@@ -108,8 +108,9 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         self.theta = np.array([0.11] * 5 + [-0.11] * 5)
         self.best_f = self.evaluator.evaluate(self.theta[:5], self.theta[5:])
         self.last_improvement = 0.0
-        # 基础学习率，基础扰动规模
-        self.a_base, self.c_base = 0.5, 0.1
+        # [核心修复] 适配小尺度参数空间的 SPSA 基础超参数
+        self.a_base = 0.005  # 原为 0.5。缩小 100 倍，防止撞墙
+        self.c_base = 0.01  # 原为 0.1。缩小 10 倍，实现精细扰动
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -141,6 +142,12 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         delta = np.random.choice([-1, 1], size=self.dim)
         theta_plus = self.theta + ck * delta
         theta_minus = self.theta - ck * delta
+
+        # [修复核心] 必须对扰动点进行物理边界截断，防止评估器返回 -50.0 的虚假梯度
+        theta_plus[:5] = np.clip(theta_plus[:5], 0.01, 0.4)
+        theta_plus[5:] = np.clip(theta_plus[5:], -0.4, -0.01)
+        theta_minus[:5] = np.clip(theta_minus[:5], 0.01, 0.4)
+        theta_minus[5:] = np.clip(theta_minus[5:], -0.4, -0.01)
 
         f_plus = self.evaluator.evaluate(theta_plus[:5], theta_plus[5:])
         f_minus = self.evaluator.evaluate(theta_minus[:5], theta_minus[5:])
