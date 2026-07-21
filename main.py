@@ -3,6 +3,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from scipy.special import comb
 from stable_baselines3 import SAC
+import matplotlib.pyplot as plt  # 新增：用于绘制对比曲线
 
 
 # ==========================================
@@ -185,7 +186,7 @@ class MetaSPSA_Airfoil_Env(gym.Env):
 
 
 # ==========================================
-# 模块三：实验调度管道 (训练与泛化验证)
+# 模块三：实验调度管道 (训练与泛化验证)与可视化对比
 # ==========================================
 if __name__ == "__main__":
     # 阶段一与二：在源任务 (NACA 0012, Re=1e6) 上训练 SAC 元智能体
@@ -195,7 +196,7 @@ if __name__ == "__main__":
     )
     env_train = MetaSPSA_Airfoil_Env(evaluator_source, max_cfd_calls=150)
 
-    # 实例化 SAC 算法，启用最大熵探索机制
+    # 实例化 SAC 算法，启用最大熵探索机制，progress_bar=True 显示训练进度条
     model = SAC(
         "MlpPolicy",
         env_train,
@@ -204,24 +205,81 @@ if __name__ == "__main__":
         buffer_size=50000,
         batch_size=64,
     )
-    model.learn(total_timesteps=5000)
+    model.learn(total_timesteps=5000, progress_bar=True)
     print(">>> 元智能体训练完成。")
 
-    # 阶段三：同分布源任务评估
-    print("\n>>> [Phase 3] 同分布环境 (NACA 0012) RL-SPSA 性能评估...")
-    obs, _ = env_train.reset()
+    # ---------------------------------------------------------
+    # 阶段三：同分布环境 (NACA 0012) 性能对比与数据采集
+    # ---------------------------------------------------------
+    print("\n>>> [Phase 3] 开始基准对比评估: 原版 SPSA vs RL-SPSA ...")
+
+    # 1. 运行原版 SPSA 并记录数据
+    env_vanilla = MetaSPSA_Airfoil_Env(evaluator_source, max_cfd_calls=150)
+    obs, _ = env_vanilla.reset()
     done = False
+
+    vanilla_calls_history = [0]
+    vanilla_f_history = [env_vanilla.best_f]
+
     while not done:
-        action, _states = model.predict(
-            obs, deterministic=True
-        )  # 使用确定性策略进行推断
-        obs, reward, terminated, truncated, info = env_train.step(action)
+        # 原版 SPSA 采用固定的刚性衰减策略，动作乘子恒定为 1.0
+        action = np.array([1.0, 1.0], dtype=np.float32)
+        obs, reward, terminated, truncated, info = env_vanilla.step(action)
+        vanilla_calls_history.append(info["calls"])
+        vanilla_f_history.append(info["best_f"])
         done = terminated or truncated
     print(
-        f"[验证结果] 最终最佳升阻比: {info['best_f']:.2f}, CFD 调用次数: {info['calls']}"
+        f"[原版 SPSA] 最终最佳升阻比: {info['best_f']:.2f}, CFD 调用次数: {info['calls']}"
     )
 
+    # 2. 运行 RL-SPSA 并记录数据
+    obs, _ = env_train.reset()
+    done = False
+
+    rl_calls_history = [0]
+    rl_f_history = [env_train.best_f]
+
+    while not done:
+        # 使用 SAC 元智能体输出动态超参数乘子，使用确定性策略进行推断
+        action, _states = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env_train.step(action)
+        rl_calls_history.append(info["calls"])
+        rl_f_history.append(info["best_f"])
+        done = terminated or truncated
+    print(
+        f"[RL-SPSA] 最终最佳升阻比: {info['best_f']:.2f}, CFD 调用次数: {info['calls']}"
+    )
+
+    # 3. 绘制对比曲线
+    plt.figure(figsize=(10, 6))
+    plt.plot(
+        vanilla_calls_history,
+        vanilla_f_history,
+        label="Vanilla SPSA (Heuristic Decay)",
+        color="gray",
+        linestyle="--",
+    )
+    plt.plot(
+        rl_calls_history,
+        rl_f_history,
+        label="RL-SPSA (SAC Meta-Control)",
+        color="blue",
+        linewidth=2,
+    )
+
+    plt.title(
+        "Aerodynamic Optimization Convergence: RL-SPSA vs Vanilla SPSA", fontsize=14
+    )
+    plt.xlabel("CFD Call Budget", fontsize=12)
+    plt.ylabel("Best Objective Value (L/D Ratio)", fontsize=12)
+    plt.legend(fontsize=12)
+    plt.grid(True, linestyle=":", alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+
+    # ---------------------------------------------------------
     # 阶段四：跨流场、跨翼型的零样本泛化测试
+    # ---------------------------------------------------------
     print(
         "\n>>> [Phase 4] 零样本泛化测试 (目标域：NACA 4412类流形, Re=3e6, Alpha=3.0) ..."
     )
