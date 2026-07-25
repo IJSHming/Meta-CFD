@@ -1,9 +1,20 @@
-import numpy as np
 import gymnasium as gym
+import matplotlib.pyplot as plt
+import numpy as np
 from gymnasium import spaces
 from scipy.special import comb
 from stable_baselines3 import SAC
-import matplotlib.pyplot as plt
+
+CFD = 300
+"""CFD调用预算"""
+RE1 = 1e6
+"""训练雷诺数"""
+RE2 = 3e6
+"""泛化雷诺数"""
+AOA1 = 5.0
+"""训练攻角"""
+AOA2 = 3.0
+"""泛化攻角"""
 
 
 # ==========================================
@@ -27,7 +38,7 @@ class AerodynamicEvaluator:
         return comb(n, i) * (x**i) * ((1 - x) ** (n - i))
 
     def generate_cst_coordinates(self, weights_u, weights_l, dz_te=0.0, n_points=100):
-        """利用 CST 算法生成翼型上下表面坐标集合"""
+        """利用 CST 算法生成翼型上下表面坐标集合，接入XFoil后才会被调用"""
         x = np.linspace(0, 1, n_points)
         class_func = np.sqrt(x) * (1.0 - x)  # N1=0.5, N2=1.0 圆头尖尾特征
         n_u, n_l = len(weights_u) - 1, len(weights_l) - 1
@@ -44,7 +55,7 @@ class AerodynamicEvaluator:
 
     def evaluate(self, weights_u, weights_l):
         """
-        返回评估指标，即升阻比 (L/D)。
+        返回评估指标，即升阻比 (L/D)。最佳值在85和100上下。
         此处模拟 XFOIL 行为：遇到无效几何返回严重惩罚。
         """
         # 几何物理约束过滤：上表面权重必须为正，下表面权重必须为负，否则交叉
@@ -87,7 +98,7 @@ class MetaSPSA_Airfoil_Env(gym.Env):
     """
 
     def __init__(self, evaluator, dim=10, max_cfd_calls=200):
-        super(MetaSPSA_Airfoil_Env, self).__init__()
+        super().__init__()
         self.evaluator = evaluator
         self.dim = dim
         self.max_cfd_calls = max_cfd_calls
@@ -108,9 +119,12 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         self.theta = np.array([0.11] * 5 + [-0.11] * 5)
         self.best_f = self.evaluator.evaluate(self.theta[:5], self.theta[5:])
         self.last_improvement = 0.0
-        # [核心修复] 适配小尺度参数空间的 SPSA 基础超参数
-        self.a_base = 0.005  # 原为 0.5。缩小 100 倍，防止撞墙
-        self.c_base = 0.01  # 原为 0.1。缩小 10 倍，实现精细扰动
+
+        # 套用 Spall 标准参数准则
+        self.a_base = 0.0002  # 调试过程：0.5 -> 0.005
+        self.c_base = 0.008  # 调试过程：0.1 -> 0.01
+        self.A_const = 10.0  # 稳定衰减常数
+
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -135,8 +149,9 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         a_multiplier, c_multiplier = action[0], action[1]
 
         # 计算 SPSA 当前代步长 (引入 RL 乘子)
-        ak = (self.a_base * a_multiplier) / ((self.cfd_calls + 10) ** 0.602)
-        ck = (self.c_base * c_multiplier) / ((self.cfd_calls + 1) ** 0.101)
+        iter_k = self.cfd_calls / 3.0
+        ak = (self.a_base * a_multiplier) / ((iter_k + self.A_const) ** 0.602)
+        ck = (self.c_base * c_multiplier) / ((iter_k + 1.0) ** 0.101)
 
         # SPSA 伯努利随机扰动近似梯度
         delta = np.random.choice([-1, 1], size=self.dim)
@@ -172,8 +187,7 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         # 密集奖励：正向改善给予重奖，无改善则施加轻微惩罚以迫使压缩预算
         reward = improvement * 5.0 - 0.2
 
-        if f_new > self.best_f:
-            self.best_f = f_new
+        self.best_f = max(self.best_f, f_new)
 
         terminated = False
         truncated = bool(self.cfd_calls >= self.max_cfd_calls)
@@ -219,9 +233,9 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     print(">>> [Phase 1 & 2] 构建源任务环境并启动 SAC 元训练...")
     evaluator_source = AerodynamicEvaluator(
-        reynolds=1e6, alpha=5.0, base_airfoil="NACA0012"
+        reynolds=RE1, alpha=AOA1, base_airfoil="NACA0012"
     )
-    env_train = MetaSPSA_Airfoil_Env(evaluator_source, max_cfd_calls=150)
+    env_train = MetaSPSA_Airfoil_Env(evaluator_source, max_cfd_calls=CFD)
 
     # 实例化 SAC 算法，启用最大熵探索机制，progress_bar=True 显示训练进度条
     model = SAC(
@@ -240,7 +254,7 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     print("\n>>> [Phase 3] 同分布环境 (NACA 0012) 评估...")
     # 1. 运行原版 SPSA 并记录数据
-    env_vanilla_3 = MetaSPSA_Airfoil_Env(evaluator_source, max_cfd_calls=150)
+    env_vanilla_3 = MetaSPSA_Airfoil_Env(evaluator_source, max_cfd_calls=CFD)
 
     vanilla_calls_3, vanilla_f_3, info_v3 = run_evaluation(env_vanilla_3, is_rl=False)
     print(f"[Phase 3 - 原版SPSA] 最终最佳升阻比: {info_v3['best_f']:.2f}")
@@ -253,15 +267,15 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     print("\n>>> [Phase 4] 零样本泛化测试 (NACA 4412) 评估...")
     evaluator_target = AerodynamicEvaluator(
-        reynolds=3e6, alpha=3.0, base_airfoil="NACA4412"
+        reynolds=RE2, alpha=AOA2, base_airfoil="NACA4412"
     )
 
-    env_vanilla_4 = MetaSPSA_Airfoil_Env(evaluator_target, max_cfd_calls=150)
+    env_vanilla_4 = MetaSPSA_Airfoil_Env(evaluator_target, max_cfd_calls=CFD)
     vanilla_calls_4, vanilla_f_4, info_v4 = run_evaluation(env_vanilla_4, is_rl=False)
     print(f"[Phase 4 - 原版SPSA] 最终最佳升阻比: {info_v4['best_f']:.2f}")
 
     # 直接复用基于源任务训练好的 SAC 模型控制优化器，不进行任何微调
-    env_rl_4 = MetaSPSA_Airfoil_Env(evaluator_target, max_cfd_calls=150)
+    env_rl_4 = MetaSPSA_Airfoil_Env(evaluator_target, max_cfd_calls=CFD)
     rl_calls_4, rl_f_4, info_r4 = run_evaluation(env_rl_4, model=model, is_rl=True)
     print(f"[Phase 4 - RL-SPSA] 最终最佳升阻比: {info_r4['best_f']:.2f}")
 
