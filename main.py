@@ -1,3 +1,7 @@
+import os
+import subprocess
+import uuid
+
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,11 +31,19 @@ class AerodynamicEvaluator:
     为保证脚本轻量化运行，此处使用数学流形模拟非凸气动特性。
     """
 
-    def __init__(self, reynolds=1e6, mach=0.1, alpha=5.0, base_airfoil="NACA0012"):
+    def __init__(
+        self,
+        reynolds=1e6,
+        mach=0.1,
+        alpha=5.0,
+        base_airfoil="NACA0012",
+        xfoil_cmd="xfoil.exe",
+    ):
         self.Re = reynolds
         self.Mach = mach
         self.alpha = alpha
         self.base = base_airfoil
+        self.xfoil_cmd = xfoil_cmd
 
     def _bernstein(self, n, i, x):
         """计算 Bernstein 多项式基函数"""
@@ -49,9 +61,74 @@ class AerodynamicEvaluator:
         for i in range(len(weights_l)):
             y_l += weights_l[i] * self._bernstein(n_l, i, x)
 
-        y_upper = class_func * y_u + x * (dz_te / 2.0)
-        y_lower = class_func * y_l - x * (dz_te / 2.0)
-        return x, y_upper, y_lower
+        y_u = class_func * y_u + x * (dz_te / 2.0)
+        y_l = class_func * y_l - x * (dz_te / 2.0)
+
+        # 拼接为 XFOIL 要求的流向 (顺时针或逆时针闭合)
+        x_u, y_u = x[::-1], y_u[::-1]  # 上表面：尾缘 -> 前缘
+        x_l, y_l = x[1:], y_l[1:]  # 下表面：前缘 -> 尾缘
+
+        x_coords = np.concatenate([x_u, x_l])
+        y_coords = np.concatenate([y_u, y_l])
+
+        return x_coords, y_coords
+
+    def _write_airfoil_file(self, x_coords, y_coords, filepath):
+        """将坐标保存为 XFOIL 可读的 .dat 文件"""
+        with open(filepath, "w") as f:
+            f.write("CST_AIRFOIL\n")
+            f.writelines(f" {x:10.6f}  {y:10.6f}\n" for x, y in zip(x_coords, y_coords))
+
+    def _run_xfoil(self, dat_path, polar_path):
+        """生成 XFOIL 控制指令脚本并用 subprocess 执行[cite: 1]"""
+        # 构建 XFOIL 命令流
+        xfoil_commands = f"""
+LOAD {dat_path}
+PANE
+OPER
+VISC {self.Re}
+MACH {self.Mach}
+ITER 150
+PACC
+{polar_path}
+
+ALFA {self.alpha}
+PACC
+QUIT
+"""
+        try:
+            # 启动进程执行 XFOIL，设置 5 秒超时保护防死锁
+            subprocess.run(
+                [self.xfoil_cmd],
+                input=xfoil_commands,
+                text=True,
+                capture_output=True,
+                timeout=5.0,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return None, None
+
+        # 解析导出的 Polar 极曲线文件
+        if not os.path.exists(polar_path):
+            return None, None
+
+        cl, cd = None, None
+        with open(polar_path, "r") as f:
+            lines = f.readlines()
+            for line in lines:
+                parts = line.split()
+                # 寻找数据行（通常匹配包含 alpha, CL, CD 的数字行）
+                if len(parts) >= 7:
+                    try:
+                        alpha_val = float(parts[0])
+                        if abs(alpha_val - self.alpha) < 1e-2:
+                            cl = float(parts[1])
+                            cd = float(parts[2])
+                            break
+                    except ValueError:
+                        continue
+        return cl, cd
 
     def evaluate(self, weights_u, weights_l):
         """
@@ -61,6 +138,32 @@ class AerodynamicEvaluator:
         # 几何物理约束过滤：上表面权重必须为正，下表面权重必须为负，否则交叉
         if np.any(weights_u < 0) or np.any(weights_l > 0):
             return -50.0  # 非物理构型的重罚
+
+        if "xfoil" in self.xfoil_cmd:
+            x_coords, y_coords = self.generate_cst_coordinates(weights_u, weights_l)
+
+            # 2. 为防止多线程/频繁调用产生文件冲突，生成唯一的临时文件名
+            uid = str(uuid.uuid4())[:8]
+            dat_path = f"temp_airfoil_{uid}.dat"
+            polar_path = f"temp_polar_{uid}.txt"
+
+            try:
+                self._write_airfoil_file(x_coords, y_coords, dat_path)
+                cl, cd = self._run_xfoil(dat_path, polar_path)
+
+                # 3. 如果 XFOIL 边界层分离不收敛或计算出非物理的 cd<=0，返还高额惩罚值[cite: 1]
+                if cl is None or cd is None or cd <= 1e-5:
+                    return -50.0
+
+                ld_ratio = cl / cd
+                return float(ld_ratio)
+
+            finally:
+                # 4. 无论成功与否，立即清理磁盘上的临时文件
+                if os.path.exists(dat_path):
+                    os.remove(dat_path)
+                if os.path.exists(polar_path):
+                    os.remove(polar_path)
 
         # 根据目标工况设定一个"虚拟的最优权重中心"，模拟优化地形
         if self.base == "NACA0012":
