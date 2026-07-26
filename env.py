@@ -74,10 +74,10 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         theta_minus = self.theta - ck * delta
 
         # 对扰动点做严格物理边界截断，防止评估器返回 -50.0 导致虚假梯度[cite: 1]
-        theta_plus[:5] = np.clip(theta_plus[:5], 0.01, 0.4)
-        theta_plus[5:] = np.clip(theta_plus[5:], -0.4, -0.01)
-        theta_minus[:5] = np.clip(theta_minus[:5], 0.01, 0.4)
-        theta_minus[5:] = np.clip(theta_minus[5:], -0.4, -0.01)
+        theta_plus[:5] = np.clip(theta_plus[:5], 0.05, 0.45)
+        theta_plus[5:] = np.clip(theta_plus[5:], -0.45, -0.05)
+        theta_minus[:5] = np.clip(theta_minus[:5], 0.05, 0.45)
+        theta_minus[5:] = np.clip(theta_minus[5:], -0.45, -0.05)
 
         f_plus = self.evaluator.evaluate(theta_plus[:5], theta_plus[5:])
         f_minus = self.evaluator.evaluate(theta_minus[:5], theta_minus[5:])
@@ -85,11 +85,15 @@ class MetaSPSA_Airfoil_Env(gym.Env):
 
         # 梯度估计与参数更新
         g = (f_plus - f_minus) / (2 * ck * delta)
-        self.theta = self.theta + ak * g
+        # 限制单步更新最大幅度 (防弹射)
+        delta_theta = ak * g
+        max_step = 0.02
+        delta_theta = np.clip(delta_theta, -max_step, max_step)
+        self.theta = self.theta + delta_theta
 
         # 中心点截断
-        self.theta[:5] = np.clip(self.theta[:5], 0.01, 0.4)
-        self.theta[5:] = np.clip(self.theta[5:], -0.4, -0.01)
+        self.theta[:5] = np.clip(self.theta[:5], 0.05, 0.45)
+        self.theta[5:] = np.clip(self.theta[5:], -0.45, -0.05)
 
         f_new = self.evaluator.evaluate(self.theta[:5], self.theta[5:])
         self.cfd_calls += 1

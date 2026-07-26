@@ -1,6 +1,9 @@
 """主运行入口（阶段 1~4 调度）"""
 
+import random
+
 import numpy as np
+import torch
 from stable_baselines3 import SAC
 
 from env import MetaSPSA_Airfoil_Env
@@ -10,8 +13,8 @@ from utils import plot_airfoil_comparison, plot_convergence_results, run_evaluat
 # ==========================================
 # 实验超参数设定
 # ==========================================
-CFD_BUDGET = 300  # 单次优化评估预算
-TRAIN_STEPS = 5000  # SAC 元训练 Timesteps
+CFD_BUDGET = 666  # 单次优化评估预算
+TRAIN_STEPS = CFD_BUDGET // 3 * 30  # SAC 元训练 Timesteps
 
 RE1, AOA1 = 1e6, 5.0  # 源任务工况 (NACA 0012)
 RE2, AOA2 = 3e6, 3.0  # 泛化目标工况 (NACA 4412)
@@ -23,6 +26,16 @@ NACA0012_THETA = np.array(
 NACA4412_THETA = np.array(
     [0.22, 0.28, 0.20, 0.14, 0.08, -0.08, -0.10, -0.08, -0.05, -0.02]
 )
+
+
+def set_global_seeds(seed=42):
+    """锁定所有随机种子，保证代码 100% 可复现"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 
 if __name__ == "__main__":
     # ---------------------------------------------------------
@@ -46,6 +59,8 @@ if __name__ == "__main__":
     )
     model.learn(total_timesteps=TRAIN_STEPS, progress_bar=True)
     print(">>> 元智能体训练完成。")
+
+    set_global_seeds()  # 传入固定种子号
 
     # ---------------------------------------------------------
     # 阶段三：同分布源任务测试 (NACA 0012)

@@ -60,8 +60,16 @@ class AerodynamicEvaluator:
         x, y_upper, y_lower, t_max = self.generate_cst_coordinates(weights_u, weights_l)
 
         # 2. 几何结构厚度约束
-        if t_max < self.min_thickness or t_max > self.max_thickness:
-            return -50.0
+        # 2. 连续软惩罚 (Soft Penalty)，保持梯度平滑连续，杜绝死锁陷阱
+        thickness_penalty = 0.0
+        if t_max < self.min_thickness:
+            thickness_penalty = 500.0 * (self.min_thickness - t_max) ** 2 + 20.0 * (
+                self.min_thickness - t_max
+            )
+        elif t_max > self.max_thickness:
+            thickness_penalty = 500.0 * (t_max - self.max_thickness) ** 2 + 20.0 * (
+                t_max - self.max_thickness
+            )
 
         coords = self._get_neuralfoil_coords(x, y_upper, y_lower)
 
@@ -77,7 +85,7 @@ class AerodynamicEvaluator:
         if cd <= 1e-5 or np.isnan(cl) or np.isnan(cd):
             return -50.0
 
-        return cl / cd
+        return cl / cd - thickness_penalty  # 平滑扣除惩罚
 
     def evaluate_detailed(self, weights_u, weights_l):
         """供可视化使用的详细评估接口，返回全套气动参数与几何坐标[cite: 1]"""
