@@ -17,7 +17,7 @@ def run_evaluation(env, model=None, is_rl=False):
         if is_rl and model is not None:
             action, _ = model.predict(obs, deterministic=True)
         else:
-            action = np.array([1.0, 1.0], dtype=np.float32)
+            action = np.array([0.0, 0.0], dtype=np.float32)
 
         obs, _, terminated, truncated, info = env.step(action)
         calls_history.append(info["calls"])
