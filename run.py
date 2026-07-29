@@ -1,125 +1,117 @@
+"""训练与测试流程控制逻辑"""
+
 import os
 
 import numpy as np
 from stable_baselines3 import SAC
 
-from env import MetaSPSA_Airfoil_Env
+from env import MetaSPSA_Airfoil_Env, MultiConditionAirfoilEnv
 from evaluator import AerodynamicEvaluator
-from utils import plot_airfoil_comparison, plot_convergence_results, run_evaluation
-
-# ==========================================
-# 全局超参数定义
-# ==========================================
-CFD_BUDGET = 501  # 单次优化评估预算
-RE1, AOA1 = 1e6, 5.0  # 源任务工况 (NACA 0012)
-RE2, AOA2 = 3e6, 3.0  # 泛化目标工况 (NACA 4412)
-
-# CST 初始特征参数定义
-NACA0012_THETA = np.array(
-    [0.15, 0.15, 0.15, 0.15, 0.15, -0.15, -0.15, -0.15, -0.15, -0.15]
-)
-NACA4412_THETA = np.array(
-    [0.22, 0.28, 0.20, 0.14, 0.08, -0.08, -0.10, -0.08, -0.05, -0.02]
+from utils import (
+    build_training_grid,
+    get_kulfan_parameters_from_name,
+    plot_airfoil_shapes_and_print_metrics,
+    plot_test_convergence,
+    run_evaluation,
 )
 
+CFD_BUDGET = 501  # 每轮评估预算 (对应 501 / 3 = 167 个 step)
 
-def train_and_save(model_path="sac_metaspsa", timesteps=5000):
-    """
-    训练阶段：实例化环境与 SAC 模型，训练完成后自动保存到本地磁盘
-    """
-    print(f">>> [Training] 启动 SAC 元训练 (Timesteps={timesteps})...")
-    evaluator_source = AerodynamicEvaluator(
-        reynolds=RE1, alpha=AOA1, min_thickness=0.10
-    )
-    env_train = MetaSPSA_Airfoil_Env(
-        evaluator_source, init_theta=NACA0012_THETA, max_cfd_calls=CFD_BUDGET
-    )
 
+def train_and_save(model_path="sac_metaspsa", rounds_per_combo=1):
+    """训练阶段：遍历 10*10*5=500 种组合，每种组合训练 rounds_per_combo 轮。"""
+    print(">>> 正在生成 10*10*5 (500种) 工况与几何组合网格...")
+    grid = build_training_grid()
+
+    total_episodes = len(grid) * rounds_per_combo
+    steps_per_episode = CFD_BUDGET // 3
+    total_timesteps = total_episodes * steps_per_episode
+
+    print(">>> [Training] SAC 元训练参数配置:")
+    print(f"    - 每工况组合训练轮数 n: {rounds_per_combo}")
+    print(f"    - 总 Episode 轮数: {total_episodes}")
+    print(f"    - 每轮 Step 数: {steps_per_episode}")
+    print(f"    - 最终总 Timesteps: {total_timesteps}")
+
+    train_env = MultiConditionAirfoilEnv(grid, max_cfd_calls=CFD_BUDGET)
+
+    # 针对 8.35 万步的 SAC 推荐超参数配置
     model = SAC(
         "MlpPolicy",
-        env_train,
+        train_env,
         verbose=0,
-        learning_rate=3e-4,
-        buffer_size=50000,
-        batch_size=64,
+        learning_rate=3e-4,  # 平稳收敛的学习率
+        buffer_size=100000,  # 完整容纳所有历史样本，防止早崩
+        batch_size=256,  # 提高高维连续空间下梯度的估计稳定性
+        learning_starts=1000,  # 前期探索步数
     )
-    model.learn(total_timesteps=timesteps, progress_bar=True)
 
-    # 保存模型 (SB3 会自动附加 .zip 拓展名)
+    # 单一进度条展示整个训练过程
+    model.learn(total_timesteps=total_timesteps, progress_bar=True)
+
     model.save(model_path)
     print(f">>> [Saved] 模型已成功保存至: {model_path}.zip")
 
 
-def load_and_test(model_path="sac_metaspsa"):
-    """
-    测试阶段：从磁盘加载模型，依次执行 Phase 3 (源任务) 与 Phase 4 (泛化测试) 评估并画图
+def load_and_test(model_path, airfoil_name, reynolds, alpha):
+    """测试阶段：根据命令行强指定的起始翼型、雷诺数与攻角跑 10 次测试，
+
+    画真实平均收敛曲线，并输出/绘制各自 10 次中的最佳结果。
     """
     model_file = f"{model_path}.zip" if not model_path.endswith(".zip") else model_path
     if not os.path.exists(model_file):
-        print(
-            f"❌ [Error] 找不到模型文件 '{model_file}'，请先运行 'python main.py train' 进行训练！"
-        )
+        print(f"❌ [Error] 找不到模型文件 '{model_file}'，请先运行训练！")
         return
 
-    print(f">>> [Testing] 成功加载本地模型: '{model_file}'")
+    print(f">>> [Testing] 加载模型 '{model_file}'...")
     model = SAC.load(model_path)
 
-    # 初始化评估器与测试环境
-    evaluator_source = AerodynamicEvaluator(
-        reynolds=RE1, alpha=AOA1, min_thickness=0.10
-    )
-    evaluator_target = AerodynamicEvaluator(
-        reynolds=RE2, alpha=AOA2, min_thickness=0.10
-    )
+    evaluator = AerodynamicEvaluator(reynolds=reynolds, alpha=alpha)
+    init_theta = get_kulfan_parameters_from_name(airfoil_name)
+    test_env = MetaSPSA_Airfoil_Env(evaluator, init_theta, max_cfd_calls=CFD_BUDGET)
 
-    # ---------------------------------------------------------
-    # 阶段三：同分布源任务评估 (NACA 0012)
-    # ---------------------------------------------------------
-    print("\n>>> [Phase 3] 评估源任务 (NACA 0012)...")
-    env_vanilla_3 = MetaSPSA_Airfoil_Env(
-        evaluator_source, init_theta=NACA0012_THETA, max_cfd_calls=CFD_BUDGET
-    )
-    env_rl_3 = MetaSPSA_Airfoil_Env(
-        evaluator_source, init_theta=NACA0012_THETA, max_cfd_calls=CFD_BUDGET
+    n_runs = 10
+    print(
+        f">>> 在工况 Re={reynolds:.2e}, Alpha={alpha}°, Airfoil={airfoil_name.upper()} 下执行 {n_runs} 次独立对比实验..."
     )
 
-    v_c3, v_f3, info_v3, theta_s_vanilla = run_evaluation(env_vanilla_3, is_rl=False)
-    r_c3, r_f3, info_r3, theta_s_rl = run_evaluation(env_rl_3, model=model, is_rl=True)
+    vanilla_f_histories = []
+    vanilla_best_f = -np.inf
+    vanilla_best_theta = None
 
-    print(f"[Phase 3 - 原版 SPSA] 最佳升阻比: {info_v3['best_f']:.2f}")
-    print(f"[Phase 3 - RL - SPSA] 最佳升阻比: {info_r3['best_f']:.2f}")
+    rl_f_histories = []
+    rl_best_f = -np.inf
+    rl_best_theta = None
 
-    # ---------------------------------------------------------
-    # 阶段四：跨工况 + 跨几何零样本泛化评估 (NACA 4412)
-    # ---------------------------------------------------------
-    print("\n>>> [Phase 4] 评估零样本泛化任务 (NACA 4412)...")
-    env_vanilla_4 = MetaSPSA_Airfoil_Env(
-        evaluator_target, init_theta=NACA4412_THETA, max_cfd_calls=CFD_BUDGET
+    for _ in range(n_runs):
+        # 1. 运行原版 SPSA
+        _c_v, f_v, b_f_v, b_t_v = run_evaluation(test_env, is_rl=False)
+        vanilla_f_histories.append(f_v)
+        if b_f_v > vanilla_best_f:
+            vanilla_best_f = b_f_v
+            vanilla_best_theta = b_t_v
+
+        # 2. 运行 RL-SPSA
+        _c_r, f_r, b_f_r, b_t_r = run_evaluation(test_env, model=model, is_rl=True)
+        rl_f_histories.append(f_r)
+        if b_f_r > rl_best_f:
+            rl_best_f = b_f_r
+            rl_best_theta = b_t_r
+
+    # 计算 10 次运行真实轨迹的均值 (无滑动平均)
+    min_len_v = min(len(h) for h in vanilla_f_histories)
+    min_len_r = min(len(h) for h in rl_f_histories)
+
+    vanilla_f_means = np.mean([h[:min_len_v] for h in vanilla_f_histories], axis=0)
+    rl_f_means = np.mean([h[:min_len_r] for h in rl_f_histories], axis=0)
+
+    calls_v = np.arange(min_len_v) * 3
+    calls_r = np.arange(min_len_r) * 3
+
+    # 1. 绘制收敛曲线
+    plot_test_convergence(calls_v, vanilla_f_means, calls_r, rl_f_means)
+
+    # 2. 格式化 print 控制台输出指标，并绘制 3 种翼型几何形状
+    plot_airfoil_shapes_and_print_metrics(
+        evaluator, init_theta, vanilla_best_theta, rl_best_theta, airfoil_name
     )
-    env_rl_4 = MetaSPSA_Airfoil_Env(
-        evaluator_target, init_theta=NACA4412_THETA, max_cfd_calls=CFD_BUDGET
-    )
-
-    v_c4, v_f4, info_v4, theta_t_vanilla = run_evaluation(env_vanilla_4, is_rl=False)
-    r_c4, r_f4, info_r4, theta_t_rl = run_evaluation(env_rl_4, model=model, is_rl=True)
-
-    print(f"[Phase 4 - 原版 SPSA] 最佳升阻比: {info_v4['best_f']:.2f}")
-    print(f"[Phase 4 - RL - SPSA] 最佳升阻比: {info_r4['best_f']:.2f}")
-
-    # ---------------------------------------------------------
-    # 绘制对比结果
-    # ---------------------------------------------------------
-    print("\n>>> [Plotting] 正在绘制评估曲线与衍生翼型对比...")
-    plot_convergence_results(
-        p3_data=(v_c3, v_f3, r_c3, r_f3), p4_data=(v_c4, v_f4, r_c4, r_f4)
-    )
-
-    theta_dict = {
-        "s_base": NACA0012_THETA,
-        "s_vanilla": theta_s_vanilla,
-        "s_rl": theta_s_rl,
-        "t_base": NACA4412_THETA,
-        "t_vanilla": theta_t_vanilla,
-        "t_rl": theta_t_rl,
-    }
-    plot_airfoil_comparison(evaluator_source, evaluator_target, theta_dict)

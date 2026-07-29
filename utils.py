@@ -1,17 +1,56 @@
-"""辅助评估函数、收敛曲线绘制与 4 种翼型几何/性能对比绘图"""
+"""辅助工具：Kulfan 参数生成、10*10*5 网格构建、测试运行与绘图/打印"""
 
+import aerosandbox as asb
 import matplotlib.pyplot as plt
 import numpy as np
 
+from evaluator import AerodynamicEvaluator
+
+
+def get_kulfan_parameters_from_name(airfoil_name):
+    """使用 AeroSandbox 将经典翼型转为 18 维 Kulfan 参数"""
+    af = asb.KulfanAirfoil(airfoil_name)
+    theta = np.concatenate(
+        [
+            np.array(af.upper_weights, dtype=np.float32),
+            np.array(af.lower_weights, dtype=np.float32),
+            np.array([af.leading_edge_weight], dtype=np.float32),
+            np.array([af.TE_thickness], dtype=np.float32),
+        ]
+    )
+    return theta
+
+
+def build_training_grid():
+    """构建 10 (Re) * 10 (Alpha) * 5 (Airfoils) = 500 种组合表格
+
+    - 雷诺数: 5e5 ~ 5e6 (均分 10 个)
+    - 攻角: 1.0 ~ 10.0 deg (均分 10 个)
+    - 起始形状: NACA 2412, NACA 0012, NACA 0015, NACA 4412, NACA 2415
+    """
+    re_list = np.linspace(5e5, 5e6, 10)
+    alpha_list = np.linspace(1.0, 10.0, 10)
+    airfoil_names = ["naca2412", "naca0012", "naca0015", "naca4412", "naca2415"]
+
+    grid = []
+    for re in re_list:
+        for alpha in alpha_list:
+            evaluator = AerodynamicEvaluator(reynolds=re, alpha=alpha)
+            for name in airfoil_names:
+                init_theta = get_kulfan_parameters_from_name(name)
+                grid.append((evaluator, init_theta))
+    return grid
+
 
 def run_evaluation(env, model=None, is_rl=False):
-    """辅助推断运行函数，记录真实 f_new 轨迹并提取最佳设计参数[cite: 1]"""
+    """单次优化评估推断，返回轨迹与最佳结果"""
     obs, _ = env.reset()
     done = False
     calls_history = [0]
-    fnew_history = [env.best_f]
+    fnew_history = [env.f]
 
     best_theta = env.best_theta.copy()
+    best_f = env.best_f
 
     while not done:
         if is_rl and model is not None:
@@ -22,184 +61,102 @@ def run_evaluation(env, model=None, is_rl=False):
         obs, _, terminated, truncated, info = env.step(action)
         calls_history.append(info["calls"])
         fnew_history.append(info["f_new"])
-        best_theta = info["best_theta"]
+        if info["best_f"] > best_f:
+            best_f = info["best_f"]
+            best_theta = info["best_theta"]
         done = terminated or truncated
 
-    return calls_history, fnew_history, info, best_theta
+    return calls_history, fnew_history, best_f, best_theta
 
 
-def moving_average(data, window_size=5):
-    """滑动平均以展示平滑趋势线"""
-    return np.convolve(data, np.ones(window_size) / window_size, mode="valid")
-
-
-def plot_convergence_results(p3_data, p4_data):
-    """绘制阶段三与阶段四的收敛对比曲线[cite: 1]"""
-    _fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-    w = 5
-
-    # 阶段三
-    v_c3, v_f3, r_c3, r_f3 = p3_data
-    axes[0].plot(v_c3, v_f3, color="gray", alpha=0.25)
-    axes[0].plot(r_c3, r_f3, color="blue", alpha=0.25)
-    axes[0].plot(
-        v_c3[w - 1 :],
-        moving_average(v_f3, w),
-        label="Vanilla SPSA (Trend)",
+def plot_test_convergence(vanilla_calls, vanilla_f_means, rl_calls, rl_f_means):
+    """绘制真实平均收敛曲线（无滑动平均）"""
+    plt.figure(figsize=(9, 5))
+    plt.plot(
+        vanilla_calls,
+        vanilla_f_means,
+        label="Vanilla SPSA (Mean)",
         color="gray",
-        linestyle="--",
-        linewidth=2,
+        linewidth=2.0,
     )
-    axes[0].plot(
-        r_c3[w - 1 :],
-        moving_average(r_f3, w),
-        label="RL-SPSA (SAC Trend)",
+    plt.plot(
+        rl_calls,
+        rl_f_means,
+        label="RL-SPSA (Mean)",
         color="blue",
         linewidth=2.5,
     )
-    axes[0].set_title("Phase 3: Source Task (NACA 0012) Convergence")
-    axes[0].set_xlabel("CFD Call Budget")
-    axes[0].set_ylabel("Current Objective Value (L/D)")
-    axes[0].legend()
-    axes[0].grid(True, linestyle=":", alpha=0.7)
-
-    # 阶段四
-    v_c4, v_f4, r_c4, r_f4 = p4_data
-    axes[1].plot(v_c4, v_f4, color="gray", alpha=0.25)
-    axes[1].plot(r_c4, r_f4, color="green", alpha=0.25)
-    axes[1].plot(
-        v_c4[w - 1 :],
-        moving_average(v_f4, w),
-        label="Vanilla SPSA (Trend)",
-        color="gray",
-        linestyle="--",
-        linewidth=2,
-    )
-    axes[1].plot(
-        r_c4[w - 1 :],
-        moving_average(r_f4, w),
-        label="RL-SPSA (Zero-shot Trend)",
-        color="green",
-        linewidth=2.5,
-    )
-    axes[1].set_title("Phase 4: Generalization Task (NACA 4412) Convergence")
-    axes[1].set_xlabel("CFD Call Budget")
-    axes[1].legend()
-    axes[1].grid(True, linestyle=":", alpha=0.7)
-
+    plt.title("Optimization Convergence Curve (Averaged over 10 Runs)")
+    plt.xlabel("CFD Call Budget")
+    plt.ylabel("Current L/D Ratio")
+    plt.grid(True, linestyle=":", alpha=0.7)
+    plt.legend()
     plt.tight_layout()
     plt.show()
 
 
-def plot_airfoil_comparison(eval_source, eval_target, theta_dict):
-    """
-    计算并对比 4 种衍生翼型与原始翼型的几何外形及最终气动性能[cite: 1]。
-    包含：Source-Vanilla, Source-RL, Target-Vanilla, Target-RL
-    """
-    # 提取各翼型的详细评估数据
-    res_s_base = eval_source.evaluate_detailed(
-        theta_dict["s_base"][:5], theta_dict["s_base"][5:]
-    )
-    res_s_van = eval_source.evaluate_detailed(
-        theta_dict["s_vanilla"][:5], theta_dict["s_vanilla"][5:]
-    )
-    res_s_rl = eval_source.evaluate_detailed(
-        theta_dict["s_rl"][:5], theta_dict["s_rl"][5:]
-    )
+def plot_airfoil_shapes_and_print_metrics(
+    evaluator, init_theta, vanilla_theta, rl_theta, airfoil_name
+):
+    """绘制 3 种翼型几何形状对比，并在控制台 print 详细气动参数"""
+    p_init = evaluator.evaluate_detailed(init_theta)
+    p_vanilla = evaluator.evaluate_detailed(vanilla_theta)
+    p_rl = evaluator.evaluate_detailed(rl_theta)
 
-    res_t_base = eval_target.evaluate_detailed(
-        theta_dict["t_base"][:5], theta_dict["t_base"][5:]
+    # 1. 命令行输出气动性能数值
+    print("\n" + "=" * 65)
+    print(f" Performance Comparison for Test Condition ({airfoil_name.upper()})")
+    print("=" * 65)
+    print(
+        f"[Initial Airfoil  ({airfoil_name.upper():^8})] L/D: {p_init['ld']:7.2f} | CL: {p_init['cl']:6.4f} | CD: {p_init['cd']:7.5f} | t_max: {p_init['t_max'] * 100:5.2f}%"
     )
-    res_t_van = eval_target.evaluate_detailed(
-        theta_dict["t_vanilla"][:5], theta_dict["t_vanilla"][5:]
+    print(
+        f"[Best Vanilla SPSA          ] L/D: {p_vanilla['ld']:7.2f} | CL: {p_vanilla['cl']:6.4f} | CD: {p_vanilla['cd']:7.5f} | t_max: {p_vanilla['t_max'] * 100:5.2f}%"
     )
-    res_t_rl = eval_target.evaluate_detailed(
-        theta_dict["t_rl"][:5], theta_dict["t_rl"][5:]
+    print(
+        f"[Best RL-SPSA (SAC)         ] L/D: {p_rl['ld']:7.2f} | CL: {p_rl['cl']:6.4f} | CD: {p_rl['cd']:7.5f} | t_max: {p_rl['t_max'] * 100:5.2f}%"
     )
+    print("=" * 65 + "\n")
 
-    _fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    # 2. 绘制纯几何翼型对比图（利用 AeroSandbox KulfanAirfoil 实例）
+    plt.figure(figsize=(10, 4))
+    x = np.linspace(0, 1, 200)
 
-    # 子图 1：源任务翼型比较 (NACA 0012 工况)
-    axes[0].plot(
-        res_s_base["x"], res_s_base["y_upper"], "k:", label="Baseline (NACA 0012)"
+    init_af = p_init["kulfan_af"]
+    van_af = p_vanilla["kulfan_af"]
+    rl_af = p_rl["kulfan_af"]
+
+    plt.plot(
+        x,
+        init_af.upper_coordinates(x)[:, 1],
+        "k:",
+        label=f"Initial ({airfoil_name.upper()})",
     )
-    axes[0].plot(res_s_base["x"], res_s_base["y_lower"], "k:")
-    axes[0].plot(
-        res_s_van["x"],
-        res_s_van["y_upper"],
+    plt.plot(x, init_af.lower_coordinates(x)[:, 1], "k:")
+
+    plt.plot(
+        x,
+        van_af.upper_coordinates(x)[:, 1],
         "gray",
         linestyle="--",
-        label="Vanilla SPSA",
+        label="Best Vanilla SPSA",
     )
-    axes[0].plot(res_s_van["x"], res_s_van["y_lower"], "gray", linestyle="--")
-    axes[0].plot(
-        res_s_rl["x"], res_s_rl["y_upper"], "b-", linewidth=2, label="RL-SPSA (SAC)"
-    )
-    axes[0].plot(res_s_rl["x"], res_s_rl["y_lower"], "b-", linewidth=2)
-    axes[0].set_title(
-        "Source Task (NACA 0012 Init) - Optimized Geometry & Performance Comparison"
-    )
-    axes[0].set_aspect("equal")
-    axes[0].grid(True, linestyle=":", alpha=0.6)
-    axes[0].legend(loc="upper right")
+    plt.plot(x, van_af.lower_coordinates(x)[:, 1], "gray", linestyle="--")
 
-    # 源任务性能文本标注
-    txt_s = (
-        f"[Baseline] L/D: {res_s_base['ld']:.2f} | CL: {res_s_base['cl']:.3f} | CD: {res_s_base['cd']:.4f} | t_max: {res_s_base['t_max'] * 100:.1f}%\n"
-        f"[Vanilla ] L/D: {res_s_van['ld']:.2f} | CL: {res_s_van['cl']:.3f} | CD: {res_s_van['cd']:.4f} | t_max: {res_s_van['t_max'] * 100:.1f}%\n"
-        f"[RL-SPSA ] L/D: {res_s_rl['ld']:.2f} | CL: {res_s_rl['cl']:.3f} | CD: {res_s_rl['cd']:.4f} | t_max: {res_s_rl['t_max'] * 100:.1f}%"
+    plt.plot(
+        x,
+        rl_af.upper_coordinates(x)[:, 1],
+        "b-",
+        linewidth=2.0,
+        label="Best RL-SPSA",
     )
-    axes[0].text(
-        0.02,
-        0.05,
-        txt_s,
-        transform=axes[0].transAxes,
-        fontsize=10,
-        bbox={"boxstyle": "round,pad=0.5", "facecolor": "white", "alpha": 0.8},
-    )
+    plt.plot(x, rl_af.lower_coordinates(x)[:, 1], "b-", linewidth=2.0)
 
-    # 子图 2：泛化任务翼型比较 (NACA 4412 工况)
-    axes[1].plot(
-        res_t_base["x"], res_t_base["y_upper"], "k:", label="Baseline (NACA 4412)"
-    )
-    axes[1].plot(res_t_base["x"], res_t_base["y_lower"], "k:")
-    axes[1].plot(
-        res_t_van["x"],
-        res_t_van["y_upper"],
-        "gray",
-        linestyle="--",
-        label="Vanilla SPSA",
-    )
-    axes[1].plot(res_t_van["x"], res_t_van["y_lower"], "gray", linestyle="--")
-    axes[1].plot(
-        res_t_rl["x"],
-        res_t_rl["y_upper"],
-        "g-",
-        linewidth=2,
-        label="RL-SPSA (Zero-shot)",
-    )
-    axes[1].plot(res_t_rl["x"], res_t_rl["y_lower"], "g-", linewidth=2)
-    axes[1].set_title(
-        "Generalization Task (NACA 4412 Init) - Optimized Geometry & Performance Comparison"
-    )
-    axes[1].set_aspect("equal")
-    axes[1].grid(True, linestyle=":", alpha=0.6)
-    axes[1].legend(loc="upper right")
-
-    # 泛化任务性能文本标注
-    txt_t = (
-        f"[Baseline] L/D: {res_t_base['ld']:.2f} | CL: {res_t_base['cl']:.3f} | CD: {res_t_base['cd']:.4f} | t_max: {res_t_base['t_max'] * 100:.1f}%\n"
-        f"[Vanilla ] L/D: {res_t_van['ld']:.2f} | CL: {res_t_van['cl']:.3f} | CD: {res_t_van['cd']:.4f} | t_max: {res_t_van['t_max'] * 100:.1f}%\n"
-        f"[RL-SPSA ] L/D: {res_t_rl['ld']:.2f} | CL: {res_t_rl['cl']:.3f} | CD: {res_t_rl['cd']:.4f} | t_max: {res_t_rl['t_max'] * 100:.1f}%"
-    )
-    axes[1].text(
-        0.02,
-        0.05,
-        txt_t,
-        transform=axes[1].transAxes,
-        fontsize=10,
-        bbox={"boxstyle": "round,pad=0.5", "facecolor": "white", "alpha": 0.8},
-    )
-
+    plt.title(f"Optimized Airfoil Shape Comparison ({airfoil_name.upper()})")
+    plt.xlabel("x/c")
+    plt.ylabel("y/c")
+    plt.gca().set_aspect("equal")
+    plt.grid(True, linestyle=":", alpha=0.6)
+    plt.legend()
     plt.tight_layout()
     plt.show()
