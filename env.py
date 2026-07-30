@@ -15,9 +15,9 @@ class MetaSPSA_Airfoil_Env(gym.Env):
 
         # 动作空间：SPSA 学习率与扰动规模调节乘子 [3^-1, 3^1]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
-        # 状态空间：[总体提升率, 近期改善率, 预算剩余率, 当前a, 当前c]
+        # 状态空间：[lg(Re)-5, Alpha/10, 总体提升率, 近期改善率, 预算剩余率, 当前a, 当前c]
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
         )
 
     def set_task(self, evaluator, init_theta):
@@ -31,8 +31,7 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         self.theta = self.init_theta.copy()
 
         # 初始点评估
-        f_init, is_valid = self.evaluator.evaluate(self.theta)
-        self.f_init = f_init if is_valid else 1.0
+        self.f_init = self.evaluator.evaluate(self.theta)
         self.f = self.f_init
 
         # best 记录仅用于最终返回输出，不参与任何改善率/状态计算
@@ -41,8 +40,8 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         self.last_improvement = 0.0
 
         # Spall 标准准则参数
-        self.a_base = 0.002  # 0.0002
-        self.c_base = 0.01  # 0.008
+        self.a_base = 0.0002  # 0.0002
+        self.c_base = 0.008  # 0.008
         self.A_const = 10.0
 
         self.ak = self.a_base / (self.A_const**0.602)
@@ -51,6 +50,11 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         return self._get_obs(), {}
 
     def _get_obs(self):
+        # 雷诺数取 lg 并减 5 (1e5~1e7 映射至 0~2)
+        log10_re_norm = float(np.log10(self.evaluator.Re) - 5.0)
+        # 攻角除以 10
+        alpha_norm = float(self.evaluator.alpha / 10.0)
+
         budget_ratio = self.cfd_calls / self.max_cfd_calls
         # 基于当前 self.f 计算总体提升率（非 self.best_f）
         rel_total_improvement = (self.f - self.f_init) / (abs(self.f_init) + 1e-6)
@@ -58,6 +62,8 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         rel_recent_improvement = self.last_improvement / (abs(self.f) + 1e-6)
         return np.array(
             [
+                log10_re_norm,
+                alpha_norm,
                 rel_total_improvement,
                 rel_recent_improvement,
                 budget_ratio,
@@ -82,42 +88,17 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         theta_minus = self.theta - ck * delta
 
         # 去除所有 clip 截断操作，直接评估物理真实值
-        f_plus, valid_plus = self.evaluator.evaluate(theta_plus)
-        f_minus, valid_minus = self.evaluator.evaluate(theta_minus)
+        f_plus = self.evaluator.evaluate(theta_plus)
+        f_minus = self.evaluator.evaluate(theta_minus)
         self.cfd_calls += 2
-
-        reward = -2.0
-
-        def get_first4_return():
-            """observation, reward, terminated, truncated"""
-            return self._get_obs(), reward, False, self.cfd_calls >= self.max_cfd_calls
-
-        def get_info_return(valid: bool):
-            return (
-                {
-                    "best_f": self.best_f,
-                    "f_new": self.f,
-                    "calls": self.cfd_calls,
-                    "best_theta": self.best_theta,
-                    "valid": valid,
-                },
-            )
-
-        # 不合规形状直接扣分 return
-        if not valid_plus or not valid_minus:
-            return get_first4_return() + get_info_return(False)
 
         # 梯度估计与无 clip 参数更新
         g = (f_plus - f_minus) / (2 * ck * delta)
         self.theta = self.theta + ak * g
 
         # 中心点评估
-        f_new, valid_new = self.evaluator.evaluate(self.theta)
+        f_new = self.evaluator.evaluate(self.theta)
         self.cfd_calls += 1
-
-        # 更新点不合规直接扣分 return
-        if not valid_new:
-            return get_first4_return() + get_info_return(False)
 
         # 允许改善率为负数
         self.last_improvement = f_new - self.f
@@ -132,7 +113,21 @@ class MetaSPSA_Airfoil_Env(gym.Env):
         rel_total_improvement = (self.f - self.f_init) / (abs(self.f_init) + 1e-6)
         reward = rel_total_improvement * 1.0
 
-        return get_first4_return() + get_info_return(True)
+        terminated = False
+        truncated = bool(self.cfd_calls >= self.max_cfd_calls)
+
+        return (
+            self._get_obs(),
+            reward,
+            terminated,
+            truncated,
+            {
+                "best_f": self.best_f,
+                "f_new": self.f,
+                "calls": self.cfd_calls,
+                "best_theta": self.best_theta,
+            },
+        )
 
 
 class MultiConditionAirfoilEnv(gym.Env):

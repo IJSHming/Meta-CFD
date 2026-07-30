@@ -18,7 +18,8 @@ class AerodynamicEvaluator:
         u_w = theta[0:8]
         l_w = theta[8:16]
         le_w = float(theta[16])
-        te_t = float(theta[17])
+        # 保证后缘厚度不为负值
+        te_t = max(0.0, float(theta[17]))
 
         kulfan_dict = {
             "upper_weights": u_w,
@@ -40,23 +41,28 @@ class AerodynamicEvaluator:
 
         返回: (ld_ratio, is_valid)
         """
-        # # 基础结构合理性判断：下表面权重不能盲目高于上表面
-        # if np.any(theta[0:8] < theta[8:16]):
-        #     return 0.0, False
-
         kulfan_dict, kulfan_af = self._theta_to_kulfan(theta)
 
         # 厚度约束校验
         t_max = kulfan_af.max_thickness()
-        if t_max < self.min_thickness or t_max > self.max_thickness:
-            return 0.0, False
+        thickness_penalty = 0.0
+        if t_max < self.min_thickness:
+            thickness_penalty = 500.0 * (self.min_thickness - t_max) ** 2 + 20.0 * (
+                self.min_thickness - t_max
+            )
+        elif t_max > self.max_thickness:
+            thickness_penalty = 500.0 * (t_max - self.max_thickness) ** 2 + 20.0 * (
+                t_max - self.max_thickness
+            )
 
         # 上下表面交叉性物理校验
         x = np.linspace(0.001, 0.999, 100)
         y_u = kulfan_af.upper_coordinates(x)[:, 1]
         y_l = kulfan_af.lower_coordinates(x)[:, 1]
-        if np.any(y_u <= y_l):
-            return 0.0, False
+        overlap = y_l - y_u
+        cross_penalty = 0.0
+        if np.any(overlap > 0):
+            cross_penalty = 1000.0 * float(np.sum(overlap[overlap > 0]))
 
         # NeuralFoil 气动计算 (直接传入 Kulfan parameters)
         aero = nf.get_aero_from_kulfan_parameters(
@@ -69,9 +75,9 @@ class AerodynamicEvaluator:
         cd = float(np.asarray(aero["CD"]).item())
 
         if cd <= 1e-5 or np.isnan(cl) or np.isnan(cd):
-            return 0.0, False
+            return -50.0
 
-        return cl / cd, True
+        return (cl / cd) - thickness_penalty - cross_penalty
 
     def evaluate_detailed(self, theta):
         """获取详细参数（供测试模式 print 输出与可视化绘图）"""

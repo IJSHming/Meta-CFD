@@ -75,41 +75,49 @@ def load_and_test(model_path, airfoil_name, reynolds, alpha):
         f">>> 在工况 Re={reynolds:.2e}, Alpha={alpha}°, Airfoil={airfoil_name.upper()} 下执行 {n_runs} 次独立对比实验..."
     )
 
+    vanilla_calls_histories = []
     vanilla_f_histories = []
     vanilla_best_f = -np.inf
     vanilla_best_theta = None
 
+    rl_calls_histories = []
     rl_f_histories = []
     rl_best_f = -np.inf
     rl_best_theta = None
 
     for _ in range(n_runs):
         # 1. 运行原版 SPSA
-        _c_v, f_v, b_f_v, b_t_v = run_evaluation(test_env, is_rl=False)
+        c_v, f_v, b_f_v, b_t_v = run_evaluation(test_env, is_rl=False)
+        vanilla_calls_histories.append(c_v)
         vanilla_f_histories.append(f_v)
         if b_f_v > vanilla_best_f:
             vanilla_best_f = b_f_v
             vanilla_best_theta = b_t_v
 
         # 2. 运行 RL-SPSA
-        _c_r, f_r, b_f_r, b_t_r = run_evaluation(test_env, model=model, is_rl=True)
+        c_r, f_r, b_f_r, b_t_r = run_evaluation(test_env, model=model, is_rl=True)
+        rl_calls_histories.append(c_r)
         rl_f_histories.append(f_r)
         if b_f_r > rl_best_f:
             rl_best_f = b_f_r
             rl_best_theta = b_t_r
 
-    # 计算 10 次运行真实轨迹的均值 (无滑动平均)
+    # 计算 10 次运行真实轨迹与呼叫次数的对齐均值
     min_len_v = min(len(h) for h in vanilla_f_histories)
     min_len_r = min(len(h) for h in rl_f_histories)
 
-    vanilla_f_means = np.mean([h[:min_len_v] for h in vanilla_f_histories], axis=0)
-    rl_f_means = np.mean([h[:min_len_r] for h in rl_f_histories], axis=0)
+    vanilla_calls_mean = np.mean(
+        [c[:min_len_v] for c in vanilla_calls_histories], axis=0
+    )
+    vanilla_f_means = np.mean([f[:min_len_v] for f in vanilla_f_histories], axis=0)
 
-    calls_v = np.arange(min_len_v) * 3
-    calls_r = np.arange(min_len_r) * 3
+    rl_calls_mean = np.mean([c[:min_len_r] for c in rl_calls_histories], axis=0)
+    rl_f_means = np.mean([f[:min_len_r] for f in rl_f_histories], axis=0)
 
     # 1. 绘制收敛曲线
-    plot_test_convergence(calls_v, vanilla_f_means, calls_r, rl_f_means)
+    plot_test_convergence(
+        vanilla_calls_mean, vanilla_f_means, rl_calls_mean, rl_f_means
+    )
 
     # 2. 格式化 print 控制台输出指标，并绘制 3 种翼型几何形状
     plot_airfoil_shapes_and_print_metrics(

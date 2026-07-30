@@ -120,7 +120,7 @@ def plot_airfoil_shapes_and_print_metrics(
 
     # 2. 绘制纯几何翼型对比图（利用 AeroSandbox KulfanAirfoil 实例）
     plt.figure(figsize=(10, 4))
-    x = np.linspace(0, 1, 200)
+    x = np.linspace(0, 1, 1000)
 
     init_af = p_init["kulfan_af"]
     van_af = p_vanilla["kulfan_af"]
