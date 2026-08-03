@@ -216,4 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 自定义
 xfoil.exe
+*.png
