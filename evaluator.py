@@ -39,11 +39,11 @@ class AerodynamicEvaluator:
     def evaluate(self, theta):
         """核心评估接口：直接传入 Kulfan parameters 进入 NeuralFoil。
 
-        返回: (ld_ratio, is_valid)
+        返回: L/D 升阻比 (扣除几何惩罚项)
         """
         kulfan_dict, kulfan_af = self._theta_to_kulfan(theta)
 
-        # 厚度约束校验
+        # 1. 厚度硬约束校验
         t_max = kulfan_af.max_thickness()
         thickness_penalty = 0.0
         if t_max < self.min_thickness:
@@ -55,7 +55,7 @@ class AerodynamicEvaluator:
                 t_max - self.max_thickness
             )
 
-        # 上下表面交叉性物理校验
+        # 2. 上下表面交叉性校验
         x = np.linspace(0.001, 0.999, 100)
         y_u = kulfan_af.upper_coordinates(x)[:, 1]
         y_l = kulfan_af.lower_coordinates(x)[:, 1]
@@ -64,7 +64,7 @@ class AerodynamicEvaluator:
         if np.any(overlap > 0):
             cross_penalty = 1000.0 * float(np.sum(overlap[overlap > 0]))
 
-        # NeuralFoil 气动计算 (直接传入 Kulfan parameters)
+        # 3. NeuralFoil 气动计算
         aero = nf.get_aero_from_kulfan_parameters(
             kulfan_parameters=kulfan_dict,
             alpha=self.alpha,
@@ -80,7 +80,7 @@ class AerodynamicEvaluator:
         return (cl / cd) - thickness_penalty - cross_penalty
 
     def evaluate_detailed(self, theta):
-        """获取详细参数（供测试模式 print 输出与可视化绘图）"""
+        """获取详细气动参数（用于测试输出与绘图）"""
         kulfan_dict, kulfan_af = self._theta_to_kulfan(theta)
         aero = nf.get_aero_from_kulfan_parameters(
             kulfan_parameters=kulfan_dict,

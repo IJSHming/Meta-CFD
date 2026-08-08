@@ -5,7 +5,7 @@ import os
 import numpy as np
 from stable_baselines3 import SAC
 
-from env import MetaSPSA_Airfoil_Env, MultiConditionAirfoilEnv
+from env import MetaCMAES_Airfoil_Env, MultiConditionAirfoilEnv
 from evaluator import AerodynamicEvaluator
 from utils import (
     build_training_grid,
@@ -15,38 +15,36 @@ from utils import (
     run_evaluation,
 )
 
-CFD_BUDGET = 501  # 每轮评估预算 (对应 501 / 3 = 167 个 step)
+CFD_BUDGET = 500  # 评估预算
 
 
-def train_and_save(model_path="sac_metaspsa", rounds_per_combo=1):
-    """训练阶段：遍历 10*10*5=500 种组合，每种组合训练 rounds_per_combo 轮。"""
+def train_and_save(model_path="sac_metacmaes", rounds_per_combo=1):
+    """训练阶段：遍历 500 种工况组合训练 SAC 模型"""
     print(">>> 正在生成 10*10*5 (500种) 工况与几何组合网格...")
     grid = build_training_grid()
 
     total_episodes = len(grid) * rounds_per_combo
-    steps_per_episode = CFD_BUDGET // 3
+    # CMA-ES 平均代数约为 CFD_BUDGET / lambda_avg (约 40 步)
+    steps_per_episode = 40
     total_timesteps = total_episodes * steps_per_episode
 
-    print(">>> [Training] SAC 元训练参数配置:")
+    print(">>> [Training] SAC + CMA-ES 元训练参数配置:")
     print(f"    - 每工况组合训练轮数 n: {rounds_per_combo}")
     print(f"    - 总 Episode 轮数: {total_episodes}")
-    print(f"    - 每轮 Step 数: {steps_per_episode}")
-    print(f"    - 最终总 Timesteps: {total_timesteps}")
+    print(f"    - 预估 Timesteps: {total_timesteps}")
 
     train_env = MultiConditionAirfoilEnv(grid, max_cfd_calls=CFD_BUDGET)
 
-    # 针对 8.35 万步的 SAC 推荐超参数配置
     model = SAC(
         "MlpPolicy",
         train_env,
         verbose=0,
-        learning_rate=3e-4,  # 平稳收敛的学习率
-        buffer_size=100000,  # 完整容纳所有历史样本，防止早崩
-        batch_size=256,  # 提高高维连续空间下梯度的估计稳定性
-        learning_starts=1000,  # 前期探索步数
+        learning_rate=3e-4,
+        buffer_size=50_000,
+        batch_size=256,
+        learning_starts=500,
     )
 
-    # 单一进度条展示整个训练过程
     model.learn(total_timesteps=total_timesteps, progress_bar=True)
 
     model.save(model_path)
@@ -54,10 +52,7 @@ def train_and_save(model_path="sac_metaspsa", rounds_per_combo=1):
 
 
 def load_and_test(model_path, airfoil_name, reynolds, alpha):
-    """测试阶段：根据命令行强指定的起始翼型、雷诺数与攻角跑 10 次测试，
-
-    画真实平均收敛曲线，并输出/绘制各自 10 次中的最佳结果。
-    """
+    """测试阶段：执行 10 次对比实验"""
     model_file = f"{model_path}.zip" if not model_path.endswith(".zip") else model_path
     if not os.path.exists(model_file):
         print(f"❌ [Error] 找不到模型文件 '{model_file}'，请先运行训练！")
@@ -68,7 +63,7 @@ def load_and_test(model_path, airfoil_name, reynolds, alpha):
 
     evaluator = AerodynamicEvaluator(reynolds=reynolds, alpha=alpha)
     init_theta = get_kulfan_parameters_from_name(airfoil_name)
-    test_env = MetaSPSA_Airfoil_Env(evaluator, init_theta, max_cfd_calls=CFD_BUDGET)
+    test_env = MetaCMAES_Airfoil_Env(evaluator, init_theta, max_cfd_calls=CFD_BUDGET)
 
     n_runs = 10
     print(
@@ -86,7 +81,7 @@ def load_and_test(model_path, airfoil_name, reynolds, alpha):
     rl_best_theta = None
 
     for _ in range(n_runs):
-        # 1. 运行原版 SPSA
+        # 1. 原版 CMA-ES
         c_v, f_v, b_f_v, b_t_v = run_evaluation(test_env, is_rl=False)
         vanilla_calls_histories.append(c_v)
         vanilla_f_histories.append(f_v)
@@ -94,7 +89,7 @@ def load_and_test(model_path, airfoil_name, reynolds, alpha):
             vanilla_best_f = b_f_v
             vanilla_best_theta = b_t_v
 
-        # 2. 运行 RL-SPSA
+        # 2. RL-CMA-ES
         c_r, f_r, b_f_r, b_t_r = run_evaluation(test_env, model=model, is_rl=True)
         rl_calls_histories.append(c_r)
         rl_f_histories.append(f_r)
@@ -102,7 +97,7 @@ def load_and_test(model_path, airfoil_name, reynolds, alpha):
             rl_best_f = b_f_r
             rl_best_theta = b_t_r
 
-    # 计算 10 次运行真实轨迹与呼叫次数的对齐均值
+    # 计算 10 次运行对齐后的均值
     min_len_v = min(len(h) for h in vanilla_f_histories)
     min_len_r = min(len(h) for h in rl_f_histories)
 
@@ -114,12 +109,9 @@ def load_and_test(model_path, airfoil_name, reynolds, alpha):
     rl_calls_mean = np.mean([c[:min_len_r] for c in rl_calls_histories], axis=0)
     rl_f_means = np.mean([f[:min_len_r] for f in rl_f_histories], axis=0)
 
-    # 1. 绘制收敛曲线
     plot_test_convergence(
         vanilla_calls_mean, vanilla_f_means, rl_calls_mean, rl_f_means
     )
-
-    # 2. 格式化 print 控制台输出指标，并绘制 3 种翼型几何形状
     plot_airfoil_shapes_and_print_metrics(
         evaluator, init_theta, vanilla_best_theta, rl_best_theta, airfoil_name
     )
