@@ -15,7 +15,7 @@ from utils import (
     run_evaluation,
 )
 
-CFD_BUDGET = 500  # 评估预算
+CFD_BUDGET = 504  # 评估预算
 
 
 def train_and_save(model_path="sac_metacmaes", rounds_per_combo=1):
@@ -24,8 +24,8 @@ def train_and_save(model_path="sac_metacmaes", rounds_per_combo=1):
     grid = build_training_grid()
 
     total_episodes = len(grid) * rounds_per_combo
-    # CMA-ES 平均代数约为 CFD_BUDGET / lambda_avg (约 40 步)
-    steps_per_episode = 40
+    # CMA-ES 平均代数约为 CFD_BUDGET / lambda_avg (约 42 步)
+    steps_per_episode = 42
     total_timesteps = total_episodes * steps_per_episode
 
     print(">>> [Training] SAC + CMA-ES 元训练参数配置:")

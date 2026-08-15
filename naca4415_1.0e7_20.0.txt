@@ -1,3 +1,5 @@
 [Initial Airfoil  (NACA4415)] L/D:   36.83 | CL: 1.9795 | CD: 0.05374 | t_max: 15.02%
 [Best Vanilla SPSA          ] L/D:  115.78 | CL: 2.4206 | CD: 0.02091 | t_max: 16.06%
 [Best RL-SPSA (SAC)         ] L/D:  122.15 | CL: 2.3377 | CD: 0.01914 | t_max: 14.29%
+[Best Vanilla CMA-ES        ] L/D:   88.13 | CL: 2.3099 | CD: 0.02621 | t_max: 17.53%
+[Best RL-CMA-ES (SAC)       ] L/D:   62.26 | CL: 2.4696 | CD: 0.03966 | t_max: 19.08%

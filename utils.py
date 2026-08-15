@@ -54,7 +54,7 @@ def run_evaluation(env, model=None, is_rl=False):
             action, _ = model.predict(obs, deterministic=True)
         else:
             # Vanilla CMA-ES: 输出 0.0 代表不额外叠加 RL 乘子和缩放
-            action = np.array([0.0, 0.0], dtype=np.float32)
+            action = np.array([0.0], dtype=np.float32)
 
         obs, _, terminated, truncated, info = env.step(action)
         calls_history.append(info["calls"])

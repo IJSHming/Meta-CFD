@@ -19,7 +19,7 @@ class AerodynamicEvaluator:
         l_w = theta[8:16]
         le_w = float(theta[16])
         # 保证后缘厚度不为负值
-        te_t = max(0.0, float(theta[17]))
+        te_t = max(0.0025, float(theta[17]))
 
         kulfan_dict = {
             "upper_weights": u_w,

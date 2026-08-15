@@ -14,10 +14,9 @@ class MetaCMAES_Airfoil_Env(gym.Env):
         self.max_cfd_calls = max_cfd_calls
         self.init_theta = np.array(init_theta, dtype=np.float32)
 
-        # 动作空间 (2维 continuous [-1, 1]):
+        # 动作空间 (1维 continuous [-1, 1]):
         # action[0]: 步长 sigma 缩放系数 (映射为 2.0^action[0])
-        # action[1]: 种群规模 lambda (映射至 6 ~ 24 的整数)
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
 
         # 状态空间 (10维):
         # [lg(Re)-5, Alpha/10, 总体提升率, 近期改善率, 预算剩余率,
@@ -47,7 +46,7 @@ class MetaCMAES_Airfoil_Env(gym.Env):
         self.stagnation_count = 0
 
         # 初始化 CMA-ES 实例
-        # 设初始步长为 0.1 (适应归一化后的 CST 参数)
+        # 设初始步长为 0.01 (适应归一化后的 CST 参数)
         self.sigma0 = 0.01
         self.es = cma.CMAEvolutionStrategy(
             self.theta,
@@ -123,7 +122,7 @@ class MetaCMAES_Airfoil_Env(gym.Env):
         self.es.sigma *= gamma_t
 
         # 3. 动态种群规模 lambda (6 ~ 24)
-        popsize = int(12 * 2 ** action[1])
+        popsize = 12
 
         # 4. CMA-ES 采样与评估
         solutions = self.es.ask(number=popsize)
