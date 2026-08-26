@@ -6,7 +6,7 @@ import numpy as np
 
 
 class AerodynamicEvaluator:
-    def __init__(self, reynolds=1e6, alpha=5.0, min_thickness=0.08, max_thickness=0.22):
+    def __init__(self, reynolds=1e6, alpha=5.0, min_thickness=0.08, max_thickness=0.2):
         self.Re = float(reynolds)
         self.alpha = float(alpha)
         self.min_thickness = min_thickness
@@ -18,8 +18,8 @@ class AerodynamicEvaluator:
         u_w = theta[0:8]
         l_w = theta[8:16]
         le_w = float(theta[16])
-        # 保证后缘厚度不为负值
-        te_t = max(0.0025, float(theta[17]))
+        # 固定后缘厚度
+        te_t = 0.0025
 
         kulfan_dict = {
             "upper_weights": u_w,
@@ -47,11 +47,11 @@ class AerodynamicEvaluator:
         t_max = kulfan_af.max_thickness()
         thickness_penalty = 0.0
         if t_max < self.min_thickness:
-            thickness_penalty = 500.0 * (self.min_thickness - t_max) ** 2 + 20.0 * (
+            thickness_penalty = 1000.0 * (self.min_thickness - t_max) ** 2 + 200.0 * (
                 self.min_thickness - t_max
             )
         elif t_max > self.max_thickness:
-            thickness_penalty = 500.0 * (t_max - self.max_thickness) ** 2 + 20.0 * (
+            thickness_penalty = 1000.0 * (t_max - self.max_thickness) ** 2 + 200.0 * (
                 t_max - self.max_thickness
             )
 
@@ -62,7 +62,7 @@ class AerodynamicEvaluator:
         overlap = y_l - y_u
         cross_penalty = 0.0
         if np.any(overlap > 0):
-            cross_penalty = 1000.0 * float(np.sum(overlap[overlap > 0]))
+            cross_penalty = 2000.0 * float(np.sum(overlap[overlap > 0]))
 
         # 3. NeuralFoil 气动计算
         aero = nf.get_aero_from_kulfan_parameters(
