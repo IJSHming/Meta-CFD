@@ -36,14 +36,25 @@ def get_kulfan_bounds(init_theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def plot_test_convergence(
-    calls_mean: np.ndarray, f_means: np.ndarray, output_file: str = None
+    vanilla_calls: np.ndarray,
+    vanilla_f_means: np.ndarray,
+    meta_calls: np.ndarray,
+    meta_f_means: np.ndarray,
+    output_file: str = None,
 ):
-    """绘制 TuRBO 真实平均收敛曲线（保持原有配色与样式）"""
+    """绘制 Vanilla TuRBO 与 LLM-Meta-TuRBO 真实平均收敛曲线对比"""
     plt.figure(figsize=(9, 5))
     plt.plot(
-        calls_mean,
-        f_means,
-        label="TuRBO (Mean)",
+        vanilla_calls,
+        vanilla_f_means,
+        label="Vanilla TuRBO (Mean)",
+        color="gray",
+        linewidth=2.0,
+    )
+    plt.plot(
+        meta_calls,
+        meta_f_means,
+        label="LLM-Meta-TuRBO (Mean)",
         color="blue",
         linewidth=2.5,
     )
@@ -61,21 +72,24 @@ def plot_test_convergence(
 def plot_airfoil_shapes_and_print_metrics(
     evaluator,
     init_theta: np.ndarray,
-    turbo_theta: np.ndarray,
+    vanilla_theta: np.ndarray,
+    meta_theta: np.ndarray,
     airfoil_name: str,
     output_file: str = None,
     output_txt: str = None,
 ):
-    """控制台输出气动参数并绘制翼型几何形状对比（保持原有配色与样式）"""
+    """控制台输出气动参数并绘制翼型几何形状对比（Vanilla vs LLM-Meta）"""
     p_init = evaluator.evaluate_detailed(init_theta)
-    p_turbo = evaluator.evaluate_detailed(turbo_theta)
+    p_vanilla = evaluator.evaluate_detailed(vanilla_theta)
+    p_meta = evaluator.evaluate_detailed(meta_theta)
 
     metrics_text = [
         "=" * 65,
         f" Performance Comparison for Test Condition ({airfoil_name.upper()})",
         "=" * 65,
         f"[Initial Airfoil  ({airfoil_name.upper():^8})] L/D: {p_init['ld']:7.2f} | CL: {p_init['cl']:6.4f} | CD: {p_init['cd']:7.5f} | t_max: {p_init['t_max'] * 100:5.2f}%",
-        f"[Best TuRBO                 ] L/D: {p_turbo['ld']:7.2f} | CL: {p_turbo['cl']:6.4f} | CD: {p_turbo['cd']:7.5f} | t_max: {p_turbo['t_max'] * 100:5.2f}%",
+        f"[Best Vanilla TuRBO         ] L/D: {p_vanilla['ld']:7.2f} | CL: {p_vanilla['cl']:6.4f} | CD: {p_vanilla['cd']:7.5f} | t_max: {p_vanilla['t_max'] * 100:5.2f}%",
+        f"[Best LLM-Meta-TuRBO        ] L/D: {p_meta['ld']:7.2f} | CL: {p_meta['cl']:6.4f} | CD: {p_meta['cd']:7.5f} | t_max: {p_meta['t_max'] * 100:5.2f}%",
         "=" * 65,
     ]
     print("\n" + "\n".join(metrics_text) + "\n")
@@ -88,7 +102,8 @@ def plot_airfoil_shapes_and_print_metrics(
     x = np.linspace(0, 1, 1000)
 
     init_af = p_init["kulfan_af"]
-    turbo_af = p_turbo["kulfan_af"]
+    vanilla_af = p_vanilla["kulfan_af"]
+    meta_af = p_meta["kulfan_af"]
 
     plt.plot(
         x,
@@ -100,12 +115,21 @@ def plot_airfoil_shapes_and_print_metrics(
 
     plt.plot(
         x,
-        turbo_af.upper_coordinates(x)[:, 1],
+        vanilla_af.upper_coordinates(x)[:, 1],
+        "gray",
+        linestyle="--",
+        label="Best Vanilla TuRBO",
+    )
+    plt.plot(x, vanilla_af.lower_coordinates(x)[:, 1], "gray", linestyle="--")
+
+    plt.plot(
+        x,
+        meta_af.upper_coordinates(x)[:, 1],
         "b-",
         linewidth=2.0,
-        label="Best TuRBO",
+        label="Best LLM-Meta-TuRBO",
     )
-    plt.plot(x, turbo_af.lower_coordinates(x)[:, 1], "b-", linewidth=2.0)
+    plt.plot(x, meta_af.lower_coordinates(x)[:, 1], "b-", linewidth=2.0)
 
     plt.title(f"Optimized Airfoil Shape Comparison ({airfoil_name.upper()})")
     plt.xlabel("x/c")

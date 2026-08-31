@@ -69,7 +69,7 @@ class AerodynamicEvaluator:
             kulfan_parameters=kulfan_dict,
             alpha=self.alpha,
             Re=self.Re,
-            model_size="medium",
+            model_size="xxxlarge",
         )
         cl = float(np.asarray(aero["CL"]).item())
         cd = float(np.asarray(aero["CD"]).item())

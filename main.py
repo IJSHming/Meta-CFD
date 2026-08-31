@@ -14,14 +14,14 @@ import run
 
 def main():
     parser = argparse.ArgumentParser(
-        description="基于 AeroSandbox / NeuralFoil / TuRBO 的翼型信任域贝叶斯优化系统"
+        description="基于 AeroSandbox / NeuralFoil / TuRBO / LLM (Qwen3.8) 的翼型元优化系统"
     )
 
     # 兼容直接输入参数或使用 test 子命令
     subparsers = parser.add_subparsers(dest="command", help="可选子命令: test")
 
     test_parser = subparsers.add_parser(
-        "test", help="对指定翼型及工况进行 10 次独立 TuRBO 测试评估"
+        "test", help="对指定翼型及工况进行 10 次独立对比测试评估 (Vanilla vs LLM-Meta-TuRBO)"
     )
 
     for p in [parser, test_parser]:
@@ -50,14 +50,57 @@ def main():
             default=10,
             help="独立优化测试轮数 (默认: 10)",
         )
+        p.add_argument(
+            "--llm_url",
+            type=str,
+            default="http://127.0.0.1:30000/v1",
+            help="SGLang / OpenAI 兼容服务地址 (默认: http://127.0.0.1:30000/v1)",
+        )
+        p.add_argument(
+            "--llm_model",
+            type=str,
+            default="Qwen/Qwen3.8-27B-FP8",
+            help="SGLang 部署的模型名称 (默认: Qwen/Qwen3.8-27B-FP8)",
+        )
+        p.add_argument(
+            "--meta_steps",
+            type=str,
+            default="11,21,41,81,161",
+            help="LLM 固定介入步数 (逗号分隔, 默认: 11,21,41,81,161)",
+        )
+        p.add_argument(
+            "--llm_timeout",
+            type=float,
+            default=60.0,
+            help="LLM 请求超时时间 (秒, 默认: 60.0)",
+        )
+        p.add_argument(
+            "--api_key",
+            type=str,
+            default="EMPTY",
+            help="SGLang / OpenAI API Key (默认: EMPTY)",
+        )
 
     args = parser.parse_args()
+
+    # 解析逗号分隔的固定干预步数
+    try:
+        meta_steps_tuple = tuple(
+            int(x.strip()) for x in args.meta_steps.split(",") if x.strip()
+        )
+    except Exception:
+        meta_steps_tuple = (11, 21, 41, 81, 161)
 
     run.test_turbo(
         airfoil_name=args.airfoil,
         reynolds=args.reynolds,
         alpha=args.alpha,
         n_runs=args.runs,
+        llm_url=args.llm_url,
+        llm_model=args.llm_model,
+        meta_steps=meta_steps_tuple,
+        llm_timeout=args.llm_timeout,
+        api_key=args.api_key,
     )
 
 
