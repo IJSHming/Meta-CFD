@@ -30,7 +30,7 @@ def test_turbo(
     llm_url: str = "http://127.0.0.1:30000/v1",
     llm_model: str = "Qwen/Qwen3.8-27B-FP8",
     meta_steps: Sequence[int] = DEFAULT_META_STEPS,
-    llm_timeout: float = 60.0,
+    llm_timeout: float = 120.0,
     api_key: str = "EMPTY",
 ):
     """测试阶段：对指定翼型与工况执行 n_runs 次独立对比实验 (Vanilla vs LLM-Meta-TuRBO)"""

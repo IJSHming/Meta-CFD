@@ -83,14 +83,27 @@ def plot_airfoil_shapes_and_print_metrics(
     p_vanilla = evaluator.evaluate_detailed(vanilla_theta)
     p_meta = evaluator.evaluate_detailed(meta_theta)
 
+    def _format_row(label: str, p: dict) -> str:
+        feas_str = "PASS" if p.get("is_feasible", False) else "FAIL"
+        line = (
+            f"[{label:<26}] L/D: {p['ld']:7.2f} | CL: {p['cl']:6.4f} | CD: {p['cd']:7.5f} | "
+            f"t_max: {p['t_max'] * 100:5.2f}% (x={p.get('x_t_max', 0.0):.2f}) | "
+            f"Area: {p.get('area', 0.0):.4f} | r_le: {p.get('le_radius', 0.0):.4f} | "
+            f"te_ang: {p.get('te_angle', 0.0):4.1f}° | CM: {p.get('cm', 0.0):6.3f} | Feasible: {feas_str}"
+        )
+        if not p.get("is_feasible", False) and p.get("violations"):
+            v_desc = ", ".join(f"{k}={v:.4f}" for k, v in p["violations"].items())
+            line += f"\n  --> Violations: {v_desc}"
+        return line
+
     metrics_text = [
-        "=" * 65,
-        f" Performance Comparison for Test Condition ({airfoil_name.upper()})",
-        "=" * 65,
-        f"[Initial Airfoil  ({airfoil_name.upper():^8})] L/D: {p_init['ld']:7.2f} | CL: {p_init['cl']:6.4f} | CD: {p_init['cd']:7.5f} | t_max: {p_init['t_max'] * 100:5.2f}%",
-        f"[Best Vanilla TuRBO         ] L/D: {p_vanilla['ld']:7.2f} | CL: {p_vanilla['cl']:6.4f} | CD: {p_vanilla['cd']:7.5f} | t_max: {p_vanilla['t_max'] * 100:5.2f}%",
-        f"[Best LLM-Meta-TuRBO        ] L/D: {p_meta['ld']:7.2f} | CL: {p_meta['cl']:6.4f} | CD: {p_meta['cd']:7.5f} | t_max: {p_meta['t_max'] * 100:5.2f}%",
-        "=" * 65,
+        "=" * 105,
+        f" Performance & Industrial Geometry Verification ({airfoil_name.upper()})",
+        "=" * 105,
+        _format_row(f"Initial Airfoil ({airfoil_name.upper()})", p_init),
+        _format_row("Best Vanilla TuRBO", p_vanilla),
+        _format_row("Best LLM-Meta-TuRBO", p_meta),
+        "=" * 105,
     ]
     print("\n" + "\n".join(metrics_text) + "\n")
 

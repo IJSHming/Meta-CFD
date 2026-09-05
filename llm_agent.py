@@ -86,7 +86,7 @@ class LLMMetaAgent:
         base_url: str = "http://127.0.0.1:30000/v1",
         model: str = "Qwen/Qwen3.8-27B-FP8",
         api_key: str = "EMPTY",
-        timeout: float = 60.0,
+        timeout: float = 120.0,
     ):
         self.base_url = base_url.rstrip("/")
         if not self.base_url.endswith("/v1"):

@@ -71,8 +71,8 @@ def main():
         p.add_argument(
             "--llm_timeout",
             type=float,
-            default=60.0,
-            help="LLM 请求超时时间 (秒, 默认: 60.0)",
+            default=120.0,
+            help="LLM 请求超时时间 (秒, 默认: 120.0)",
         )
         p.add_argument(
             "--api_key",
