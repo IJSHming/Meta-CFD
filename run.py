@@ -64,7 +64,7 @@ def test_turbo(
     for i in range(n_runs):
         print(f"\n>>> [Run {i + 1}/{n_runs}] 正在进行第 {i + 1} 轮独立对比测试...")
 
-        # 1. 运行 Vanilla TuRBO 基线 (n_init=10)
+        # 1. 运行 Vanilla TuRBO 基线 (n_init=20)
         print(f"  [1/2] 运行 Vanilla TuRBO (Seed={i})...")
         c_v, f_v, b_f_v, b_t_v = run_turbo_optimization(
             objective_func=evaluator.evaluate,
@@ -72,7 +72,7 @@ def test_turbo(
             lb=lb,
             ub=ub,
             max_evals=CFD_BUDGET,
-            n_init=10,
+            n_init=20,
             seed=i,
             verbose_every=100,
             is_meta=False,
@@ -84,7 +84,7 @@ def test_turbo(
             vanilla_best_f = b_f_v
             vanilla_best_theta = b_t_v
 
-        # 2. 运行 LLM-Meta-TuRBO (n_init=10, 固定在第 11, 21, 41, 81, 161 步介入)
+        # 2. 运行 LLM-Meta-TuRBO (n_init=20, 固定在第 31, 51, 81, 121, 161 步介入)
         print(f"  [2/2] 运行 LLM-Meta-TuRBO (Seed={i}, LLM={llm_model})...")
         c_m, f_m, b_f_m, b_t_m = run_turbo_optimization(
             objective_func=evaluator.evaluate,
@@ -92,7 +92,7 @@ def test_turbo(
             lb=lb,
             ub=ub,
             max_evals=CFD_BUDGET,
-            n_init=10,
+            n_init=20,
             seed=i,
             verbose_every=100,
             is_meta=True,

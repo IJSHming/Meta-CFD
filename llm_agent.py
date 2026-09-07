@@ -3,7 +3,7 @@
 import json
 import re
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Sequence
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -47,9 +47,9 @@ try:
             le=2.0,
             description="Thompson Sampling 后验不确定性探索缩放 (范围 [0.5, 2.0])",
         )
-        force_restart: bool = Field(
-            default=False,
-            description="是否在局部严重停滞时强制触发信任域重启",
+        suggested_point: Optional[Sequence[float]] = Field(
+            default=None,
+            description="当判断优化陷入停滞时，可直接指定下一步采样点的 18 维归一化坐标 [0, 1]^18 (长度为 18 的浮点数列表)；若无需直接指定，设为 null",
         )
 except ImportError:
     HAS_PYDANTIC = False
@@ -61,18 +61,22 @@ Your task is to dynamically adjust the hyperparameters of a Trust Region Bayesia
 Every batch of CFD evaluations, you receive the current optimization state:
 1. Physical conditions (Airfoil, Reynolds number, Alpha angle, CFD budget).
 2. Optimization progress & performance (initial L/D, best L/D, recent window improvements, CL, CD, max thickness).
-3. TuRBO internal dynamics (trust region length L, consecutive successes/failures, stagnation count).
+3. Current best airfoil geometry (18-dimensional normalized coordinates in [0, 1]^18: upper weights 0-7, lower weights 8-15, leading edge weight 16, trailing edge thickness 17).
+4. TuRBO internal dynamics (trust region length L, consecutive successes/failures, stagnation count).
 
-CRITICAL INSTRUCTION:
-- Keep your chain-of-thought concise and focused (strictly under 150 words).
-- Conclude your thought quickly and immediately output the single JSON object.
+CRITICAL INSTRUCTIONS FOR REASONING EFFICIENCY:
+- Keep your thinking process EXTREMELY BRIEF (strictly under 60 words).
+- DO NOT perform manual arithmetic, math derivations, or coordinate-by-coordinate calculations in your thinking.
+- Formulate a 1-2 sentence high-level aerodynamic rationale, then IMMEDIATELY finish thinking and output the final JSON object.
 
 JSON fields required:
 - "thought": A brief 1-2 sentence engineering rationale.
 - "length_scale_factor": float in [0.5, 2.0]. (Multiplier for trust region length L. Expand >1.0 if consistent progress in a gradient direction; shrink <1.0 if oscillating or near convergence).
 - "prob_perturb": float in [0.1, 1.0]. (Probability of mutating each of the 18 Kulfan shape weights. Lower values like 0.2~0.4 focus on fine-tuning local shape coordinates; higher values like 0.8~1.0 perform global exploration).
 - "exploration_weight": float in [0.5, 2.0]. (Multiplier for Thompson Sampling posterior uncertainty. Higher boosts exploration, lower favors exploitation).
-- "force_restart": boolean. (true ONLY if severely stagnated in an unpromising local aerodynamic minimum for a long time, otherwise false).
+- "suggested_point": null OR a list of exactly 18 floats in [0.0, 1.0].
+  * If the optimizer is progressing normally, set this to null to let TuRBO's Thompson Sampling select the candidate.
+  * If the optimizer has stagnated or is trapped in an inferior local region, you can directly override TuRBO's next candidate: take the Current Best Normalized Parameters provided above and apply small targeted perturbations (+/- 0.02 to 0.08) to key parameters (such as upper camber/thickness or LE radius) directly in the final JSON array.
 
 Respond ONLY with the final valid JSON object.
 """
@@ -109,12 +113,26 @@ class LLMMetaAgent:
 
     def build_user_prompt(self, state: Dict[str, Any]) -> str:
         """构建结构化状态提示词"""
+        best_pt = state.get("best_point_unit")
+        geom_str = ""
+        if best_pt and len(best_pt) == 18:
+            u_w = [round(float(x), 4) for x in best_pt[0:8]]
+            l_w = [round(float(x), 4) for x in best_pt[8:16]]
+            le_w = round(float(best_pt[16]), 4)
+            te_t = round(float(best_pt[17]), 4)
+            geom_str = (
+                f"\n=== Current Best Normalized Parameters ([0, 1]^18) ===\n"
+                f"- Upper Weights (0-7): {u_w}\n"
+                f"- Lower Weights (8-15): {l_w}\n"
+                f"- LE Weight (16): {le_w} | TE Thickness (17): {te_t}\n"
+            )
+
         prompt = f"""=== Current Optimization State ===
 - Airfoil: {state.get('airfoil_name', 'N/A')} | Re: {state.get('reynolds', 0):.2e} | Alpha: {state.get('alpha', 0)} deg
 - Progress: Step {state.get('step', 0)} / {state.get('max_evals', 500)} (Remaining Budget: {state.get('budget_left', 0)})
 - Initial L/D: {state.get('init_ld', 0):.2f} | Global Best L/D: {state.get('best_ld', 0):.2f} (Total Gain: {state.get('total_gain', 0):.2f}%)
-- Current Best Geometry: CL = {state.get('best_cl', 0):.4f}, CD = {state.get('best_cd', 0):.5f}, t_max = {state.get('best_t_max', 0)*100:.2f}% (Valid Range: 8% ~ 22%)
-
+- Current Best Aerodynamics: CL = {state.get('best_cl', 0):.4f}, CD = {state.get('best_cd', 0):.5f}, t_max = {state.get('best_t_max', 0)*100:.2f}% (Valid Range: 8% ~ 22%)
+{geom_str}
 === Recent Window ===
 - Window Best L/D: {state.get('window_best_ld', 0):.2f} | Window Mean L/D: {state.get('window_mean_ld', 0):.2f}
 - Improvements in Last Window: {state.get('window_improvements', 0)}
@@ -126,7 +144,7 @@ class LLMMetaAgent:
 - Failure Counter: {state.get('failure_counter', 0)} / {state.get('failure_tolerance', 18)}
 - Restarts So Far: {state.get('restart_count', 0)}
 
-Concisely analyze and output your JSON decision:"""
+Concisely analyze in <60 words and output final JSON:"""
         return prompt
 
     def decide_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -139,12 +157,12 @@ Concisely analyze and output your JSON decision:"""
             "length_scale_factor": 1.0,
             "prob_perturb": float(min(20.0 / state.get("dim", 18), 1.0)),
             "exploration_weight": 1.0,
-            "force_restart": False,
+            "suggested_point": None,
         }
 
         try:
             if HAS_OPENAI and self.client is not None:
-                # 采用 Qwen 官方推荐的 Thinking Mode 采样超参
+                # 采用 Qwen 官方推荐的 Thinking Mode 采样超参，max_tokens 调宽至 3072 防止截断
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
@@ -159,16 +177,22 @@ Concisely analyze and output your JSON decision:"""
                         "min_p": 0.0,
                         "repetition_penalty": 1.0,
                     },
-                    max_tokens=2048,
+                    max_tokens=3072,
                 )
 
                 choice = response.choices[0]
                 raw_text = choice.message.content or ""
                 reasoning = getattr(choice.message, "reasoning_content", None)
+                finish_reason = getattr(choice, "finish_reason", "")
 
                 action = self._parse_json_response(raw_text, default_action)
-                if reasoning and action.get("thought") == default_action["thought"]:
-                    action["thought"] = reasoning.strip()
+
+                # 如果因为 token 耗尽被截断且未解析出 JSON，打印友好预警，不输出超长思维草稿
+                if finish_reason == "length" and action.get("thought") == default_action["thought"]:
+                    action["thought"] = "[LLM Warning] Thinking tokens exceeded limit before JSON completion. Falling back to default TuRBO dynamics."
+                elif reasoning and action.get("thought") == default_action["thought"]:
+                    # 若有简短 reasoning 且只占前两句，取前 150 字符
+                    action["thought"] = reasoning.strip()[:150] + ("..." if len(reasoning.strip()) > 150 else "")
 
                 return action
             else:
@@ -185,7 +209,7 @@ Concisely analyze and output your JSON decision:"""
                     "top_k": 20,
                     "min_p": 0.0,
                     "repetition_penalty": 1.0,
-                    "max_tokens": 2048,
+                    "max_tokens": 3072,
                 }
                 req_data = json.dumps(payload).encode("utf-8")
                 req = urllib.request.Request(
@@ -227,10 +251,31 @@ Concisely analyze and output your JSON decision:"""
         if not isinstance(data, dict):
             return default_action
 
+        # 提取 candidate direct point (兼容 suggested_point 与 direct_point)
+        suggested_raw = data.get("suggested_point")
+        if suggested_raw is None:
+            suggested_raw = data.get("direct_point")
+
+        suggested_cleaned = None
+        if isinstance(suggested_raw, (list, tuple)) and len(suggested_raw) > 0:
+            cleaned_list = []
+            for v in suggested_raw:
+                try:
+                    val = float(v)
+                    cleaned_list.append(max(0.0, min(1.0, val)))
+                except (TypeError, ValueError):
+                    cleaned_list.append(None)
+            if any(x is not None for x in cleaned_list):
+                suggested_cleaned = cleaned_list
+
         if HAS_PYDANTIC:
             try:
-                validated = MetaActionModel(**data)
-                return validated.model_dump()
+                data_copy = dict(data)
+                data_copy["suggested_point"] = suggested_cleaned
+                validated = MetaActionModel(**data_copy)
+                res = validated.model_dump()
+                res["suggested_point"] = suggested_cleaned
+                return res
             except Exception:
                 pass
 
@@ -246,5 +291,5 @@ Concisely analyze and output your JSON decision:"""
             "exploration_weight": float(
                 max(0.5, min(2.0, data.get("exploration_weight", 1.0)))
             ),
-            "force_restart": bool(data.get("force_restart", False)),
+            "suggested_point": suggested_cleaned,
         }

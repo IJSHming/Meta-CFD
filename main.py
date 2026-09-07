@@ -65,8 +65,8 @@ def main():
         p.add_argument(
             "--meta_steps",
             type=str,
-            default="11,21,41,81,161",
-            help="LLM 固定介入步数 (逗号分隔, 默认: 11,21,41,81,161)",
+            default="31,51,81,121,161",
+            help="LLM 固定介入步数 (逗号分隔, 默认: 31,51,81,121,161)",
         )
         p.add_argument(
             "--llm_timeout",
@@ -89,7 +89,7 @@ def main():
             int(x.strip()) for x in args.meta_steps.split(",") if x.strip()
         )
     except Exception:
-        meta_steps_tuple = (11, 21, 41, 81, 161)
+        meta_steps_tuple = (31, 51, 81, 121, 161)
 
     run.test_turbo(
         airfoil_name=args.airfoil,

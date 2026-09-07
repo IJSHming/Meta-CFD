@@ -21,8 +21,8 @@ from torch.quasirandom import SobolEngine
 
 warnings.filterwarnings("ignore")
 
-# 默认固定 5 次早期指数级干预步数
-DEFAULT_META_STEPS = (11, 21, 41, 81, 161)
+# 默认固定 5 次干预步数 (显著大于 n_init=20，且 <= 161，与每 10 步 GP 重拟合精准对齐)
+DEFAULT_META_STEPS = (31, 51, 81, 121, 161)
 
 
 @dataclass
@@ -145,7 +145,7 @@ def run_turbo_optimization(
     lb: np.ndarray,
     ub: np.ndarray,
     max_evals: int = 500,
-    n_init: int = 10,
+    n_init: int = 20,
     seed: int = 0,
     verbose_every: int = 100,
     is_meta: bool = False,
@@ -162,12 +162,12 @@ def run_turbo_optimization(
         lb: 参数下界
         ub: 参数上界
         max_evals: 最大评估预算 (默认 500)
-        n_init: 初始采样点数量 (默认 10)
+        n_init: 初始采样点数量 (默认 20)
         seed: 随机种子
         verbose_every: 进度打印间隔
         is_meta: 是否启用 LLM 元优化
         llm_agent: LLMMetaAgent 实例
-        meta_steps: 固定 LLM 干预步数序列 (默认 [11, 21, 41, 81, 161])
+        meta_steps: 固定 LLM 干预步数序列 (默认 [31, 51, 81, 121, 161])
         airfoil_name: 翼型名称 (用于 LLM Prompt)
         evaluator: AerodynamicEvaluator 实例 (用于提取详细气动特征)
 
@@ -193,7 +193,7 @@ def run_turbo_optimization(
         x_real = lb_tensor + (ub_tensor - lb_tensor) * x
         return x_real.detach().cpu().numpy()
 
-    # 1. 初始采样点生成 (n_init=10 点，包含基准翼型点与 Sobol 扰动点)
+    # 1. 初始采样点生成 (n_init 点，包含基准翼型点与 Sobol 扰动点)
     x_init_unit = to_unit_cube(
         torch.tensor(init_theta, dtype=dtype, device=device)
     ).unsqueeze(0)
@@ -249,8 +249,9 @@ def run_turbo_optimization(
     # 4. TuRBO 主优化循环
     while len(Y_train) < max_evals:
         target_step = len(Y_train) + 1
+        direct_suggested_x = None
 
-        # 检查是否触发信任域重启
+        # 检查是否触发信任域重启 (算法自身收缩重置)
         if state.restart_triggered:
             state = TurboState(
                 dim=dim,
@@ -286,7 +287,7 @@ def run_turbo_optimization(
             except Exception:
                 model = SingleTaskGP(X_train, norm_Y)
 
-        # --- LLM 固定步数元优化干预 (在第 11, 21, 41, 81, 161 步触发，共 5 次) ---
+        # --- LLM 固定步数元优化干预 (在第 31, 51, 81, 121, 161 步触发，共 5 次) ---
         if is_meta and llm_agent is not None and (target_step in target_meta_steps_set):
             # 提取近期窗口数据
             window_len = 10
@@ -318,6 +319,12 @@ def run_turbo_optimization(
                 (current_best_f - init_ld) / (abs(init_ld) + 1e-6) * 100.0
             )
 
+            # 提取当前最佳几何在归一化空间 [0, 1]^18 中的坐标
+            best_idx = int(Y_train.argmax().item())
+            best_unit_vec = [
+                round(float(v), 4) for v in X_train[best_idx].detach().cpu().numpy()
+            ]
+
             state_dict = {
                 "airfoil_name": airfoil_name,
                 "reynolds": getattr(evaluator, "Re", 2.5e6) if evaluator else 2.5e6,
@@ -332,6 +339,7 @@ def run_turbo_optimization(
                 "best_cl": cl_val,
                 "best_cd": cd_val,
                 "best_t_max": t_max_val,
+                "best_point_unit": best_unit_vec,
                 "window_best_ld": window_best,
                 "window_mean_ld": window_mean,
                 "window_improvements": window_improvements,
@@ -359,28 +367,48 @@ def run_turbo_optimization(
             current_prob_perturb = action["prob_perturb"]
             current_exploration_weight = action["exploration_weight"]
 
-            if action.get("force_restart", False):
-                state.restart_triggered = True
+            # 检查 LLM 是否直接指定了下一个候选点
+            suggested_pt = action.get("suggested_point") or action.get("direct_point")
+            has_direct_point = False
+            if isinstance(suggested_pt, (list, tuple)) and len(suggested_pt) > 0:
+                best_unit_tensor = X_train[best_idx].clone()
+                pt_clamped = []
+                for dim_idx in range(dim):
+                    if dim_idx < len(suggested_pt) and suggested_pt[dim_idx] is not None:
+                        try:
+                            val = float(suggested_pt[dim_idx])
+                            pt_clamped.append(max(0.0, min(1.0, val)))
+                        except (ValueError, TypeError):
+                            pt_clamped.append(float(best_unit_tensor[dim_idx].item()))
+                    else:
+                        pt_clamped.append(float(best_unit_tensor[dim_idx].item()))
+                direct_suggested_x = torch.tensor([pt_clamped], dtype=dtype, device=device)
+                has_direct_point = True
 
             print(
-                f"        [LLM Meta-Intervention @ Step {target_step:3d}] TR Factor: {action['length_scale_factor']:.2f}, Perturb: {current_prob_perturb:.2f}, Explr: {current_exploration_weight:.2f}, Restart: {action.get('force_restart', False)}"
+                f"        [LLM Meta-Intervention @ Step {target_step:3d}] TR Factor: {action['length_scale_factor']:.2f}, Perturb: {current_prob_perturb:.2f}, Explr: {current_exploration_weight:.2f}, DirectPoint: {has_direct_point}"
             )
             if action.get("thought"):
                 print(f"          Thought: {action['thought']}")
+            if has_direct_point:
+                print(f"          --> [Candidate Override] Using LLM directly suggested point for next evaluation!")
 
-        # 生成候选并采样
-        n_candidates = min(100 * dim, 5000)
-        X_next = generate_batch(
-            state=state,
-            model=model,
-            X=X_train,
-            Y=norm_Y,
-            n_candidates=n_candidates,
-            prob_perturb=current_prob_perturb,
-            exploration_weight=current_exploration_weight,
-            dtype=dtype,
-            device=device,
-        )
+        # 生成候选并采样 (若 LLM 直接指定了候选点则直接选用)
+        if direct_suggested_x is not None:
+            X_next = direct_suggested_x
+        else:
+            n_candidates = min(100 * dim, 5000)
+            X_next = generate_batch(
+                state=state,
+                model=model,
+                X=X_train,
+                Y=norm_Y,
+                n_candidates=n_candidates,
+                prob_perturb=current_prob_perturb,
+                exploration_weight=current_exploration_weight,
+                dtype=dtype,
+                device=device,
+            )
 
         # 评估目标函数
         theta_next = from_unit_cube(X_next[0])
