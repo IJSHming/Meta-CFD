@@ -117,16 +117,20 @@ class AerodynamicEvaluator:
         k1: float = 120.0,
         k2: float = 400.0,
     ) -> float:
-        """工业绝对主导惩罚函数：
+        """平滑有界工业约束惩罚函数：
 
         当约束被违背 (violation > 0) 时：
-        - 立即施加 base_step 门槛跃阶惩罚（直接抹平潜在气动收益）；
-        - 附加连续的一阶与二阶项，为贝叶斯优化（TuRBO）提供朝向可行域的明确下降梯度。
+        - 连续性：P(0) = 0，消除突变断崖阶跃，避免破坏高斯过程/神经网络的长度尺度与拟合稳定性；
+        - 严厉排斥：在违背初期具有陡峭上升斜率 (dP/d violation >> d(L/D)/d x)，
+          确保任何违规带来的微弱气动收益被立即抹平；
+        - 渐近有界：利用双曲正切函数 tanh 平滑饱和，单项约束惩罚控制在约 1.5 * base_step，
+          辅以弱线性渐近导引项，确保远端梯度不消失且数值绝对稳定在 [-150, +220] 空间。
         """
         if violation <= 0.0:
             return 0.0
-        rel = violation / scale
-        return base_step + k1 * rel + k2 * (rel ** 2)
+        rel = float(violation) / max(float(scale), 1e-8)
+        cap = 1.5 * base_step
+        return float(cap * np.tanh(1.2 * rel) + 2.0 * rel)
 
     def validate_geometry(
         self, kulfan_af: asb.KulfanAirfoil
@@ -141,10 +145,10 @@ class AerodynamicEvaluator:
             yu = kulfan_af.upper_coordinates(x_sample)[:, 1]
             yl = kulfan_af.lower_coordinates(x_sample)[:, 1]
         except Exception:
-            return True, 500.0, {}
+            return True, 50.0, {}
 
         if np.any(np.isnan(yu)) or np.any(np.isnan(yl)):
-            return True, 500.0, {}
+            return True, 50.0, {}
 
         thickness_sample = yu - yl
         overlap = yl - yu  # 下表面高过上表面即为交叉
@@ -155,7 +159,8 @@ class AerodynamicEvaluator:
         # 致命几何缺陷判断：表面反转交叉或严重塌陷
         if max_overlap > 1e-4 or min_thickness_found < 0.0 or max_thickness_sample < 0.02:
             overlap_sum = float(np.sum(np.maximum(0.0, overlap)))
-            fatal_penalty = 100.0 + 5000.0 * (overlap_sum + max(0.0, 0.02 - max_thickness_sample))
+            overlap_term = overlap_sum + max(0.0, 0.02 - max_thickness_sample)
+            fatal_penalty = 15.0 + 35.0 * float(np.tanh(50.0 * overlap_term))
             idx_tmax = int(np.argmax(thickness_sample))
             return True, fatal_penalty, {
                 "t_max": max_thickness_sample,

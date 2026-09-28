@@ -221,3 +221,6 @@ __marimo__/
 xfoil.exe
 *.png
 *.txt
+*.pdf
+*.pt
+*.json

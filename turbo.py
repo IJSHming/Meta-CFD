@@ -227,12 +227,14 @@ def run_turbo_optimization(
     init_ld = Y_train_list[0]
     Y_train = torch.tensor(Y_train_list, dtype=dtype, device=device).unsqueeze(-1)
 
+    fail_tol = 6 if max_evals <= 300 else max(4, dim // 3)
+
     # 3. 初始化 TuRBO 状态
     state = TurboState(
         dim=dim,
         batch_size=1,
         best_value=current_best_f,
-        failure_tolerance=dim,
+        failure_tolerance=fail_tol,
     )
 
     model = None
@@ -240,8 +242,8 @@ def run_turbo_optimization(
     restart_count = 0
     stagnation_count = 0
 
-    # 动态超参 (受 LLM 控制)
-    current_prob_perturb = min(20.0 / dim, 1.0)
+    # 动态超参 (受任务最佳实践与 LLM 控制)
+    current_prob_perturb = min(10.0 / dim, 0.6)  # 扰动约 50% 坐标 (9 维)，防范全维跳变
     current_exploration_weight = 1.0
 
     target_meta_steps_set = set(meta_steps)
@@ -257,7 +259,7 @@ def run_turbo_optimization(
                 dim=dim,
                 batch_size=1,
                 best_value=float(Y_train.max().item()),
-                failure_tolerance=dim,
+                failure_tolerance=fail_tol,
             )
             model = None
             restart_count += 1
@@ -278,7 +280,7 @@ def run_turbo_optimization(
             try:
                 model = SingleTaskGP(X_train, norm_Y, covar_module=covar_module)
                 mll = ExactMarginalLogLikelihood(model.likelihood, model)
-                fit_gpytorch_mll(mll, optimizer_kwargs={"maxiter": 20})
+                fit_gpytorch_mll(mll)
             except Exception:
                 model = SingleTaskGP(X_train, norm_Y, covar_module=covar_module)
         else:
