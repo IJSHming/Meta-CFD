@@ -215,7 +215,7 @@ class MALIBOOptimizer:
         top_cand_order = np.argsort(utilities)[::-1]
         if self.geometry_validator is not None:
             chosen_cand = None
-            for idx in top_cand_order[:50]:
+            for idx in top_cand_order[:150]:
                 cand_real = self.to_real(cands[idx])
                 if self.geometry_validator(cand_real):
                     chosen_cand = cands[idx]
