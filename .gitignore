@@ -220,6 +220,7 @@ __marimo__/
 # 自定义
 xfoil.exe
 *.png
+!malibo/malibo_vs_turbo.png
 *.txt
 *.pdf
 *.pt
