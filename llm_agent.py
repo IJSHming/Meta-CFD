@@ -226,9 +226,10 @@ Concisely analyze in <60 words and output final JSON:"""
                     return self._parse_json_response(raw_text, default_action)
 
         except Exception as e:
-            # 打印异常提示并平滑降级，保证优化不中断
-            print(f"        [LLM Warning] Request encountered '{type(e).__name__}: {e}'. Falling back to default TuRBO.")
-            return default_action
+            raise RuntimeError(
+                f"[LLM Fatal Error in Meta-CFD] Live request to {self.base_url} failed with {type(e).__name__}: {e}. "
+                "Silent degradation is strictly forbidden under research integrity rules."
+            ) from e
 
     def _parse_json_response(
         self, text: str, default_action: Dict[str, Any]
