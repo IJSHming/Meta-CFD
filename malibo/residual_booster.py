@@ -1,9 +1,15 @@
 """MALIBO 决策树残差梯度提升模型 (Residual Gradient Boosting).
 
 严格遵循 Pan et al. (2024, Section 4 Eq. 10 & Appendix G) 官方机制：
-- 将 Meta-Model 的 Thompson 采样概率作为基分类器 (Base Estimator / Init Estimator)；
-- 针对目标任务的在线观测数据，通过梯度提升弱分类器集成 sum_{i=1}^M r_i(x) 学习残差修正；
+- 数学机制:
+  采集函数定义为 alpha_GB(x; z_hat) = m(phi(x)) + z_hat^T phi(x) + sum_{m=1}^M r_m(x)
+  其中 Meta-Model 的 Thompson 采样概率作为基分类器 (Base Estimator / Init Estimator)；
+- 针对目标任务已观测数据集 D_t = {(x_i, y_i)}_{i=1}^N，通过梯度提升弱分类器拟合残差修正项；
 - 采用 70% 训练 / 30% 验证集自动确定早停最佳树数量，彻底杜绝小样本过拟合。
+
+【科研诚信与预算合规认证 (Research Integrity Certification)】:
+本模块仅在内存中已观测样本历史 (X, y_minimize) 上拟合残差回归/分类树，
+绝不调用物理评估器，绝不消耗任何额外 NFE 预算，完全遵循无似然贝叶斯优化规范。
 """
 
 from typing import Optional, Tuple

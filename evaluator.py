@@ -44,6 +44,7 @@ class AerodynamicEvaluator:
         enforce_smoothness: bool = True,
         min_cm: Optional[float] = -0.15,
         penalty_scale: float = 1.0,
+        max_evals: Optional[int] = None,
     ):
         self.Re = float(reynolds)
         self.alpha = float(alpha)
@@ -86,13 +87,21 @@ class AerodynamicEvaluator:
         # 全局惩罚系数
         self.penalty_scale = float(penalty_scale)
 
+        # 统一评估计数器与预算防线 (严禁白嫖评估预算)
+        self.max_evals = int(max_evals) if max_evals is not None else None
+        self.eval_count = 0
+
+    def reset_counter(self) -> None:
+        """重置评估计数器"""
+        self.eval_count = 0
+
     def _theta_to_kulfan(self, theta) -> Tuple[Dict[str, Any], asb.KulfanAirfoil]:
         """将 18 维向量拆解为 AeroSandbox 与 NeuralFoil 格式"""
         theta = np.asarray(theta, dtype=np.float64)
         u_w = theta[0:8]
         l_w = theta[8:16]
-        le_w = float(theta[16])
-        te_t = 0.0025
+        le_w = float(theta[16]) if len(theta) > 16 else 0.0
+        te_t = float(theta[17]) if len(theta) > 17 else 0.0025
 
         kulfan_dict = {
             "upper_weights": u_w,
@@ -366,15 +375,22 @@ class AerodynamicEvaluator:
 
         先进行工业几何前置筛查，致命缺陷直接早退拦截（不调用 NeuralFoil）；
         通过几何筛查后进入 NeuralFoil 气动计算，并施加绝对主导约束惩罚。
+        严格锁定评估计数器：每次调用严格 +1，超预算直接拦截。
 
         返回: L/D 升阻比 (扣除所有几何与气动违背惩罚项)
         """
+        if self.max_evals is not None and self.eval_count >= self.max_evals:
+            raise RuntimeError(
+                f"[NFE Budget Violation in Meta-CFD] Evaluation count reached max_evals ({self.eval_count} >= {self.max_evals}). "
+                "Further function evaluations are strictly forbidden."
+            )
+        self.eval_count += 1
+
         kulfan_dict, kulfan_af = self._theta_to_kulfan(theta)
 
         # 1. 工业几何前置校验
         is_fatal, fatal_penalty, geom_metrics = self.validate_geometry(kulfan_af)
         if is_fatal:
-            # 致命缺陷立即返回重罚，杜绝神经网络分布外幻觉
             return -100.0 - fatal_penalty
 
         # 2. NeuralFoil 气动计算
@@ -401,6 +417,9 @@ class AerodynamicEvaluator:
         is_feasible, total_penalty, _, _ = self.calculate_penalties(
             geom_metrics, aero=aero_dict
         )
+
+        if not is_feasible:
+            return min(-10.0, float(raw_ld - 150.0 - total_penalty))
 
         return raw_ld - total_penalty
 

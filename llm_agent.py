@@ -99,6 +99,7 @@ class LLMMetaAgent:
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.interaction_log: List[Dict[str, Any]] = []
 
         if HAS_OPENAI:
             # 禁用自动多重重试 (max_retries=0)，避免中途断开导致 SGLang 丢弃正在生成的会话并从头 Prefill
@@ -186,14 +187,12 @@ Concisely analyze in <60 words and output final JSON:"""
                 finish_reason = getattr(choice, "finish_reason", "")
 
                 action = self._parse_json_response(raw_text, default_action)
-
-                # 如果因为 token 耗尽被截断且未解析出 JSON，打印友好预警，不输出超长思维草稿
-                if finish_reason == "length" and action.get("thought") == default_action["thought"]:
-                    action["thought"] = "[LLM Warning] Thinking tokens exceeded limit before JSON completion. Falling back to default TuRBO dynamics."
-                elif reasoning and action.get("thought") == default_action["thought"]:
-                    # 若有简短 reasoning 且只占前两句，取前 150 字符
-                    action["thought"] = reasoning.strip()[:150] + ("..." if len(reasoning.strip()) > 150 else "")
-
+                self.interaction_log.append({
+                    "step": state.get("step"),
+                    "user_prompt": user_prompt,
+                    "raw_response": raw_text,
+                    "action": action,
+                })
                 return action
             else:
                 # 若未安装 openai 库时的标准库回退
@@ -223,7 +222,14 @@ Concisely analyze in <60 words and output final JSON:"""
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     res_json = json.loads(resp.read().decode("utf-8"))
                     raw_text = res_json["choices"][0]["message"]["content"].strip()
-                    return self._parse_json_response(raw_text, default_action)
+                    action = self._parse_json_response(raw_text, default_action)
+                    self.interaction_log.append({
+                        "step": state.get("step"),
+                        "user_prompt": user_prompt,
+                        "raw_response": raw_text,
+                        "action": action,
+                    })
+                    return action
 
         except Exception as e:
             raise RuntimeError(
@@ -250,7 +256,7 @@ Concisely analyze in <60 words and output final JSON:"""
                     pass
 
         if not isinstance(data, dict):
-            return default_action
+            raise ValueError(f"[Meta-CFD LLM Parsing Error] Failed to parse valid dictionary from response:\n{clean_text}")
 
         # 提取 candidate direct point (兼容 suggested_point 与 direct_point)
         suggested_raw = data.get("suggested_point")
