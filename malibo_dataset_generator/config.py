@@ -14,12 +14,12 @@ DEFAULT_TASKS_DIR = DEFAULT_DATA_DIR / "tasks"
 DEFAULT_MANIFEST_PATH = DEFAULT_DATA_DIR / "meta_dataset_manifest.json"
 DEFAULT_PT_PATH = DEFAULT_DATA_DIR / "malibo_train_dataset.pt"
 
-# 5 种迥异的起始基准翼型
+# 5 种迥异的起始基准翼型 (全部在统一 18 维 Kulfan 搜索盒内 100% 物理可行)
 BASELINE_AIRFOILS: Sequence[str] = (
     "naca0012",  # 1. 纯对称翼型 (零弯度，反转对称)
     "naca2412",  # 2. 经典常规民航/通航巡航型 (适度弯度，平缓失速)
-    "naca6412",  # 3. 大弯度高升力翼型 (深弯度，极高 CL0)
-    "naca2418",  # 4. 大厚度强结构/高油箱容积型 (18% 厚度，近上限)
+    "naca4412",  # 3. 较大弯度高升力翼型 (高 CL0)
+    "naca2415",  # 4. 较厚结构型 (15% 厚度)
     "b737b",     # 5. 真实现代喷气式客机超临界/后加载工程型 (平坦吸力面与后弯)
 )
 

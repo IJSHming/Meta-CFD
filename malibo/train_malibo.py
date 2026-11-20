@@ -109,14 +109,13 @@ def main():
     res_cfg = ResFFNConfig(in_dim=18, feature_dim=50)
     model = MALIBOMetaModel(num_tasks=dataset.num_tasks, config=res_cfg)
 
-    # 训练配置
+    # 训练配置 (严格对齐 Appendix G)
     train_cfg = TrainingConfig(
         lr=args.lr,
         batch_size=args.batch_size,
         epochs=args.epochs,
         early_stopping_patience=args.patience,
         reg_lambda=args.reg_lambda,
-        use_compile=args.compile,
     )
 
     trainer = MALIBOTrainer(model=model, config=train_cfg, device=device)

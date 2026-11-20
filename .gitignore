@@ -225,3 +225,4 @@ xfoil.exe
 *.pdf
 *.pt
 *.json
+malibo_dataset_generator/data/

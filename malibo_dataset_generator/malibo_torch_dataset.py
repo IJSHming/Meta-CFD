@@ -84,15 +84,17 @@ class MALIBOMetaDataset(Dataset):
             y_penalized = torch.tensor(data["Y_penalized"], dtype=torch.float32)
             y_min = torch.tensor(data["Y_minimize"], dtype=torch.float32)
 
-            # 计算该任务特异性的 gamma 分位数阈值 tau
-            # 注意: y_min 越小越好 (y = -L/D)，gamma 分位数代表最优秀的 top-gamma 样本
-            tau_val = float(np.quantile(y_min.numpy(), self.gamma))
+            # 截断极端不可行惩罚离群值 (score <= -10 -> y_min <= +10.0) 后按任务内零均值单位方差标准化
+            # 保持分位数与 EI 严格仿射不变性，同时对齐跨 Re / Alpha 工况的 LFBO 效用权重尺度
+            y_clean = torch.clamp(y_min, max=10.0)
+            y_mean = float(y_clean.mean().item())
+            y_std_val = max(float(y_clean.std().item()) if len(y_clean) > 1 else 1.0, 1e-4)
+            y_norm = (y_clean - y_mean) / y_std_val
 
-            # 二分类标签: k = 1 (y <= tau，即属于 top 1/3 的优质设计)
-            labels = (y_min <= tau_val).float()
-
-            # 效用加权项: w = max(tau - y, 0)
-            weights = torch.clamp(tau_val - y_min, min=0.0)
+            # 严格按 Eq. (2): tau = Phi^-1(gamma), k = 1(y <= tau), w = max(tau - y, 0)
+            tau_val = float(np.quantile(y_norm.numpy(), self.gamma))
+            labels = (y_norm <= tau_val).float()
+            weights = torch.clamp(tau_val - y_norm, min=0.0)
 
             task_obj = MALIBOTaskData(
                 task_id=int(data["task_id"]),

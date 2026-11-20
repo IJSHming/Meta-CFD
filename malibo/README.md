@@ -12,10 +12,10 @@
 | :--- | :--- | :--- |
 | **Section 4 (Figure 2)** | [`models.py`](file:///home/msds/c250089/notebook/CFD/malibo/models.py) | **ResFFN 骨干与双重预测层**：4 个残差块（每块 64 单元，ELU 激活）映射原始参数至 $\Phi \in \mathbb{R}^{50}$；任务无关均值层 $m(\Phi) \to \mathbb{R}$；各任务嵌入向量 $z_t \in \mathbb{R}^{50}$，输出 Logit $a = m(\Phi) + z_t^T \Phi$。 |
 | **Eq. (2) & Eq. (6)** | [`losses.py`](file:///home/msds/c250089/notebook/CFD/malibo/losses.py) | **LFBO 效用加权损失**：基于分位数 $\gamma=1/3$ 划分阈值 $\tau$。推导使用软间隔连续形式：$\mathcal{L} = w \cdot \text{softplus}(-a) + \text{softplus}(a)$，彻底杜绝 $\log(0)$、NaN 与除零错误。 |
-| **Eq. (4) & Appendix C** | [`losses.py`](file:///home/msds/c250089/notebook/CFD/malibo/losses.py) | **潜在任务空间高斯正则化器 $R(Z)$**：结合 Kolmogorov-Smirnov (KS) 边际分布匹配与经验协方差对齐，自动根据先验样本估算 $\lambda_{KS}$ 与 $\lambda_{Cov}$ 归一化系数，约束 $z_t \sim \mathcal{N}(0, I)$。 |
-| **Eq. (6) ~ Eq. (9)** | [`adaptation.py`](file:///home/msds/c250089/notebook/CFD/malibo/adaptation.py) | **任务自适应与 Laplace 近似**：固定特征网络，在目标任务上通过 L-BFGS（`strong_wolfe`）求解 $z_{MAP}$；计算精确负 Hessian 精度矩阵 $\Sigma_N^{-1}$ 并进行 Cholesky 分解，抽取 Thompson 样本 $\hat{z} \sim \mathcal{N}(z_{MAP}, \Sigma_N)$。 |
-| **Eq. (10) & Appendix G** | [`residual_booster.py`](file:///home/msds/c250089/notebook/CFD/malibo/residual_booster.py) | **决策树残差梯度提升 (GBDT)**：以 Meta-Model 的 Thompson 采样为基分类器（`InitEstimator`），通过 70% 训练 / 30% 验证早停确定树数量，叠加误差残差修正 $C_{GB}(x) = \sigma(m(\phi(x)) + \hat{z}^T \phi(x) + \sum r_i(x))$。 |
-| **Algorithm 1** | [`optimizer.py`](file:///home/msds/c250089/notebook/CFD/malibo/optimizer.py) | **完整元学习贝叶斯优化闭环**：第 0 步由 $g_\omega(x)$ 推荐 $x_0$；后续步自适应更新 $z$ 并融入残差树，通过 5,120 个低差异 Sobol 候选点极大化采集函数。 |
+| **Eq. (4) & Appendix C** | [`losses.py`](file:///home/msds/c250089/notebook/repos/Meta-CFD/malibo/losses.py) | **潜在任务空间高斯正则化器 $R(Z)$**：基于顺序统计量排序的精确非参数 Kolmogorov-Smirnov (KS) 边际 CDF 匹配与经验协方差对齐，通过多次先验采样估算 $\lambda_{KS}$ 与 $\lambda_{Cov}$，将 $z_t$ 精确约束至 $\mathcal{N}(0, I_{50})$。 |
+| **Eq. (6) ~ Eq. (9)** | [`adaptation.py`](file:///home/msds/c250089/notebook/repos/Meta-CFD/malibo/adaptation.py) | **任务自适应与 Laplace 近似**：固定特征网络，在标准化目标观测上通过 L-BFGS（`strong_wolfe`）求解 $z_{MAP}$；计算精确负 Hessian 精度矩阵 $\Sigma_N^{-1}$ 并做 Cholesky 分解，按固定 $\gamma=1/3$ 抽取纯净 Thompson 样本 $\hat{z} \sim \mathcal{N}(z_{MAP}, \Sigma_N)$（无人工方差地板）。 |
+| **Eq. (10) & Appendix G** | [`residual_booster.py`](file:///home/msds/c250089/notebook/repos/Meta-CFD/malibo/residual_booster.py) | **决策树残差梯度提升 (GBDT)**：以 Meta-Model 的 Thompson 采样为基分类器（`InitEstimator`），按 LFBO 双标签等价加权格式在 70% 训练 / 30% 验证切分上早停选择最优树数（含 0 棵树基线），构建残差修正 $C_{GB}(x) = \sigma(m(\phi(x)) + \hat{z}^T \phi(x) + \sum r_i(x))$。 |
+| **Algorithm 1** | [`optimizer.py`](file:///home/msds/c250089/notebook/repos/Meta-CFD/malibo/optimizer.py) | **严格原论文版全局贝叶斯元优化闭环**：彻底移除信赖域、稀疏坐标掩码与几何预筛器；严格按 Appendix G 在完整 $[0,1]^D$ 空间执行 5,120 点全局均匀随机搜索极大化 $C_{GB}(x;\hat{z})$。 |
 
 ---
 

@@ -16,53 +16,50 @@ from evaluator import AerodynamicEvaluator
 from malibo_dataset_generator.config import BASELINE_AIRFOILS
 
 
-def get_airfoil_parameters(airfoil_name: str) -> np.ndarray:
-    """提取指定翼型的 18 维 Kulfan (CST) 几何参数。
+def _get_canonical_naca0012_theta() -> np.ndarray:
+    """获取 NACA 0012 标准 18 维 Kulfan 参数 (与 RL-Airfoil/src/airfoil_utils.py 完全一致)."""
+    af = asb.Airfoil("naca0012").to_kulfan_airfoil(n_weights_per_side=8)
+    return np.concatenate([
+        np.asarray(af.upper_weights, dtype=np.float64),
+        np.asarray(af.lower_weights, dtype=np.float64),
+        [float(af.leading_edge_weight), float(af.TE_thickness)],
+    ])
 
-    统一将后缘钝化厚度 TE_thickness 对齐为 0.0025，与工业评估器完全契合。
+
+def get_airfoil_bounds(init_theta: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """返回与 RL-Airfoil 100% 比特级一致的全局统一 18 维 Kulfan 搜索空间 [lb, ub].
+
+    固定同一全局归一化坐标映射 [0, 1]^18 <-> [lb, ub]，确保元训练任务与下游测试任务
+    在潜在特征空间 phi(x_unit) 中物理语义完全对齐。
     """
-    af = asb.KulfanAirfoil(airfoil_name)
+    base_theta = _get_canonical_naca0012_theta()
+    lb = np.zeros(18, dtype=np.float64)
+    ub = np.zeros(18, dtype=np.float64)
+
+    lb[0:8] = np.maximum(0.01, base_theta[0:8] - 0.20)
+    ub[0:8] = base_theta[0:8] + 0.25
+    lb[8:16] = base_theta[8:16] - 0.25
+    ub[8:16] = np.minimum(0.05, base_theta[8:16] + 0.20)
+    lb[16] = -0.05
+    ub[16] = 0.05
+    lb[17] = 0.0010
+    ub[17] = 0.0060
+    return lb, ub
+
+
+def get_airfoil_parameters(airfoil_name: str) -> np.ndarray:
+    """提取指定翼型的 18 维 Kulfan (CST) 几何参数并裁剪至统一搜索盒内。"""
+    af = asb.Airfoil(airfoil_name).to_kulfan_airfoil(n_weights_per_side=8)
     theta = np.concatenate(
         [
-            np.array(af.upper_weights, dtype=np.float64),
-            np.array(af.lower_weights, dtype=np.float64),
-            np.array([af.leading_edge_weight], dtype=np.float64),
-            np.array([max(0.0025, float(af.TE_thickness))], dtype=np.float64),
+            np.asarray(af.upper_weights, dtype=np.float64),
+            np.asarray(af.lower_weights, dtype=np.float64),
+            np.array([float(af.leading_edge_weight)], dtype=np.float64),
+            np.array([float(af.TE_thickness)], dtype=np.float64),
         ]
     )
-    return theta
-
-
-def get_airfoil_bounds(init_theta: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """生成 18 维搜索空间的自适应上下界 [lb, ub]。
-
-    严格确保 init_theta 在 [lb, ub] 内，且保证充足且物理合理的探索空间。
-    """
-    init_theta = np.asarray(init_theta, dtype=np.float64)
-
-    # 默认航空工程经验边界
-    default_lb = np.array([-0.2] * 8 + [-0.6] * 8 + [0.0, 0.0025], dtype=np.float64)
-    default_ub = np.array([0.6] * 8 + [0.2] * 8 + [0.5, 0.03], dtype=np.float64)
-
-    lb = np.minimum(init_theta - 0.2, default_lb)
-    ub = np.maximum(init_theta + 0.2, default_ub)
-
-    # 后缘物理厚度硬约束下限
-    lb[17] = 0.0025
-    ub[17] = max(float(ub[17]), 0.03)
-
-    # 前缘修形权重大于等于0
-    lb[16] = max(0.0, float(lb[16]))
-
-    # 确保严格严格 init_theta 在 [lb, ub] 内部
-    lb = np.minimum(lb, init_theta)
-    ub = np.maximum(ub, init_theta)
-
-    # 杜绝任何退化区间
-    delta = np.maximum(ub - lb, 1e-4)
-    ub = np.where(ub <= lb, lb + delta, ub)
-
-    return lb, ub
+    lb, ub = get_airfoil_bounds()
+    return np.clip(theta, lb, ub)
 
 
 def verify_airfoil_geometry(
@@ -103,19 +100,19 @@ def get_baseline_descriptions() -> Dict[str, Dict[str, str]]:
             "application": "Cessna 172、经典轻型民用飞机机翼",
             "features": "适度前弯度，平缓失速，在中低雷诺数下拥有极宽的低阻巡航桶。",
         },
-        "naca6412": {
+        "naca4412": {
             "category": "大弯度高升力型 (High-Camber / High-Lift Airfoil)",
-            "camber": "5.8% (大弯度)",
+            "camber": "4.0% (高弯度)",
             "thickness": "12.0%",
-            "application": "STOL 短距起降机、高空长航时无人机 (HALE)、低速风力发电机",
-            "features": "大弯度产生极高的零攻角升力系数 (CL0 ~ 0.7)，适合低速大升力工况。",
+            "application": "STOL 短距起降机、高空长航时无人机 (HALE)、低速升力面",
+            "features": "大弯度产生极高零攻角升力系数，在低中攻角下具备高升阻比。",
         },
-        "naca2418": {
-            "category": "大厚度强结构/高油箱容积型 (Thick Structural / Root Airfoil)",
-            "camber": "1.8%",
-            "thickness": "18.0% (接近 20% 约束上限)",
-            "application": "大型客机内侧翼根段 (Wing Root)、重载运输机、大型风电叶根",
-            "features": "抗弯截面模量大、油箱容积大，但背风逆压梯度极陡，易过早诱导分离。",
+        "naca2415": {
+            "category": "厚结构翼型 (Thick Structural Airfoil)",
+            "camber": "2.0% (适度弯度)",
+            "thickness": "15.0%",
+            "application": "机翼内段、高抗弯结构需求机翼",
+            "features": "较大相对厚度提供高抗弯模量与油箱容积，边界层逆压梯度显著。",
         },
         "b737b": {
             "category": "现代喷气客机跨音速/后加载工程型 (Modern Jet Transport / Aft-loaded Profile)",

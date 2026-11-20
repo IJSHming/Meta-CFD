@@ -130,11 +130,6 @@ def main():
     opt_cfg.optimization.budget = args.budget
     init_x_unit = (init_theta - lb) / (ub - lb + 1e-8)
 
-    def is_geom_valid(th: np.ndarray) -> bool:
-        _, af = evaluator._theta_to_kulfan(th)
-        is_fatal, _, _ = evaluator.validate_geometry(af)
-        return not is_fatal
-
     malibo_opt = MALIBOOptimizer(
         meta_model=model,
         dim=18,
@@ -144,7 +139,6 @@ def main():
         evaluate_init_first=True,
         config=opt_cfg,
         budget=args.budget,
-        geometry_validator=is_geom_valid,
         device=device,
     )
 

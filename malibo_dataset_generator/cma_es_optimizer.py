@@ -97,9 +97,10 @@ def run_cma_es(
     current_best_f = -float("inf")
     best_theta = init_theta.copy()
 
-    # 1. 优先评估任务基准初值 (Step 1 物理基准锚定)
+    # 1. 优先评估任务基准初值 (Step 1 物理基准锚定，与 evaluator.evaluate 保持严格一致的可行域负分隔离)
     det_0 = evaluator_detailed_func(init_theta)
-    val_0 = float(det_0.get("ld_penalized", -100.0))
+    raw_pen_0 = float(det_0.get("ld_penalized", -100.0))
+    val_0 = raw_pen_0 if bool(det_0.get("is_feasible", False)) else min(-10.0, raw_pen_0 - 150.0)
     current_best_f = val_0
     best_theta = init_theta.copy()
 
@@ -145,7 +146,8 @@ def run_cma_es(
             theta_i = lb_arr + (ub_arr - lb_arr) * cand_unit
 
             det = evaluator_detailed_func(theta_i)
-            val = float(det.get("ld_penalized", -100.0))
+            raw_pen = float(det.get("ld_penalized", -100.0))
+            val = raw_pen if bool(det.get("is_feasible", False)) else min(-10.0, raw_pen - 150.0)
 
             if val > current_best_f:
                 current_best_f = val

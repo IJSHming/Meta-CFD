@@ -1,20 +1,19 @@
 """MALIBO 神经网络元训练引擎 (Meta-Trainer).
 
-严格遵循 Pan et al. (2024, Section 4 Eq. 3 & Appendix G) 训练机制：
-- 联合最小化 LFBO 效用分类损失与任务空间高斯先验正则项 R({z_t}; p(Z))；
-- 采用 Adam 优化器，学习率 lr=1e-3，每轮指数衰减 factor=0.999；
-- 批大小 B=256，支持早停 (Early Stopping) 与模型权重检查点自动保存。
+严格遵循原论文 Pan et al. (ICML 2024, Section 4 Eq. 2-4 & Appendix C/G)：
+- 联合最小化精确 Eq. (2) LFBO 效用分类损失与 Eq. (4) 排序 KS + 协方差高斯先验正则项 R({z_t}; N(0, I))；
+- 采用 Adam 优化器 (lr=1e-3, 无 weight_decay)，每轮指数衰减 factor=0.999；
+- 批大小 B=256，80/20 训练-验证集切分并基于验证损失执行早停 (Early Stopping)。
 """
 
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-import numpy as np
 import torch
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ExponentialLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 from malibo.config import TrainingConfig
 from malibo.losses import LatentSpaceRegularizer, LFBOLoss
@@ -22,7 +21,7 @@ from malibo.models import MALIBOMetaModel
 
 
 class MALIBOTrainer:
-    """MALIBO 元学习分类器训练管理器."""
+    """MALIBO 元学习分类器训练管理器 (Strictly Paper-Exact Appendix G)."""
 
     def __init__(
         self,
@@ -44,7 +43,6 @@ class MALIBOTrainer:
             torch.set_float32_matmul_precision("high")
 
         self.model.to(self.device)
-
         self.lfbo_criterion = LFBOLoss()
         self.reg_criterion = LatentSpaceRegularizer(
             feature_dim=self.model.feature_dim
@@ -52,7 +50,8 @@ class MALIBOTrainer:
 
         self.history: Dict[str, List[float]] = {
             "epoch": [],
-            "loss": [],
+            "train_loss": [],
+            "val_loss": [],
             "lfbo_loss": [],
             "reg_loss": [],
             "ks_loss": [],
@@ -66,181 +65,166 @@ class MALIBOTrainer:
         checkpoint_path: Optional[Path] = None,
         log_interval: int = 50,
     ) -> Dict[str, List[float]]:
-        """执行完整 2,048 轮 (带早停) 元训练循环.
+        """执行 80/20 验证早停元训练循环 (最多 2,048 轮)."""
+        total_samples = len(train_dataset)
+        val_len = int(total_samples * 0.20)
+        train_len = total_samples - val_len
 
-        参数:
-            train_dataset: PyTorch Dataset (如 MALIBOMetaDataset)
-            checkpoint_path: 最优模型保存路径
-            log_interval: 控制台日志打印间隔 (轮数)
-        """
-        # 判断是否可开启显存常驻 (In-VRAM Zero-Copy) 极速批处理
+        gen = torch.Generator().manual_seed(self.config.seed)
+        train_sub, val_sub = random_split(train_dataset, [train_len, val_len], generator=gen)
+
         use_in_vram = (
             self.device.type == "cuda"
             and hasattr(train_dataset, "_flat_x")
             and train_dataset._flat_x is not None
         )
 
+        batch_size = self.config.batch_size
         if use_in_vram:
-            print("    - 数据加载模式: 显存常驻极速切片 (In-VRAM Zero-Copy, 零 CPU 开销)")
-            x_all = train_dataset._flat_x.to(self.device, non_blocking=True)
-            task_idx_all = train_dataset._flat_task_idx.to(self.device, non_blocking=True)
-            weights_all = train_dataset._flat_weights.to(self.device, non_blocking=True)
-            total_samples = len(x_all)
-            batch_size = self.config.batch_size
-            num_batches_per_epoch = total_samples // batch_size
-            n_used = num_batches_per_epoch * batch_size
-        else:
-            print("    - 数据加载模式: 标准 PyTorch DataLoader (CPU 主存流式批次)")
-            loader = DataLoader(
-                train_dataset,
-                batch_size=self.config.batch_size,
-                shuffle=True,
-                drop_last=True,
-                pin_memory=(self.device.type == "cuda"),
-            )
+            tr_idx = torch.tensor(train_sub.indices, dtype=torch.long)
+            va_idx = torch.tensor(val_sub.indices, dtype=torch.long)
+            x_tr_all = train_dataset._flat_x[tr_idx].to(self.device, non_blocking=True)
+            t_tr_all = train_dataset._flat_task_idx[tr_idx].to(self.device, non_blocking=True)
+            w_tr_all = train_dataset._flat_weights[tr_idx].to(self.device, non_blocking=True)
 
-        # 优化器配置: CUDA 环境优先开启 Fused Adam，合并内核消除启动延迟
-        use_fused = (
-            getattr(self.config, "fused_adam", True)
-            and self.device.type == "cuda"
-        )
-        optimizer = Adam(self.model.parameters(), lr=self.config.lr, fused=use_fused)
+            x_va_all = train_dataset._flat_x[va_idx].to(self.device, non_blocking=True)
+            t_va_all = train_dataset._flat_task_idx[va_idx].to(self.device, non_blocking=True)
+            w_va_all = train_dataset._flat_weights[va_idx].to(self.device, non_blocking=True)
+        else:
+            train_loader = DataLoader(train_sub, batch_size=batch_size, shuffle=True, drop_last=False)
+            val_loader = DataLoader(val_sub, batch_size=batch_size, shuffle=False, drop_last=False)
+
+        # Appendix G: Adam(lr=1e-3, 无 weight_decay) + ExponentialLR(0.999)
+        optimizer = Adam(self.model.parameters(), lr=self.config.lr)
         scheduler = ExponentialLR(optimizer, gamma=self.config.lr_decay_factor)
 
-        # 单批训练原子步骤
-        def _train_step(bx, b_task_idx, bw):
-            optimizer.zero_grad(set_to_none=True)
-            logits = self.model(bx, b_task_idx)
-            loss_lfbo = self.lfbo_criterion(logits, bw)
-            loss_reg, ks, cov = self.reg_criterion(self.model.task_embeddings)
-            total_loss = loss_lfbo + self.config.reg_lambda * loss_reg
-            total_loss.backward()
-            optimizer.step()
-            return total_loss, loss_lfbo, loss_reg, ks, cov
-
-        # 计算图编译优化 (CUDA Graphs): 消除 Python 调度与内核发射开销
-        use_compile = (
-            getattr(self.config, "use_compile", True)
-            and self.device.type == "cuda"
-            and hasattr(torch, "compile")
-        )
-        if use_compile:
-            print("    - 算子优化: 启用 torch.compile(mode='reduce-overhead') CUDA Graphs 极速固化")
-            train_step_fn = torch.compile(_train_step, mode="reduce-overhead")
-        else:
-            train_step_fn = _train_step
-
-        # 标定 KS 与 Cov 正则权重系数
-        self.reg_criterion.calibrate_coefficients(
-            num_tasks=self.model.num_tasks, device=self.device
+        # 标定 KS 与 Cov 正则权重系数 (Eq. 29)
+        l_ks, l_cov = self.reg_criterion.calibrate_coefficients(
+            num_tasks=self.model.num_tasks, device=self.device, num_samples=200
         )
 
-        best_loss = float("inf")
+        best_val_loss = float("inf")
+        best_state = None
         patience_counter = 0
         t0 = time.time()
+        in_dim = int(train_dataset._flat_x.shape[-1]) if hasattr(train_dataset, "_flat_x") else 18
 
-        print("=" * 80)
-        print(f">>> [MALIBOTrainer] 开始元训练 (Meta-Training)...")
-        print(f"    - 设备: {self.device}")
-        print(f"    - 训练样本总量: {len(train_dataset):,} 条")
-        print(f"    - 任务数量: {self.model.num_tasks} 个")
-        print(f"    - 批大小: {self.config.batch_size}, 最大轮数: {self.config.epochs}")
-        print(f"    - 正则化系数: lambda = {self.config.reg_lambda}")
-        print("=" * 80)
+        print("=" * 84)
+        print(f">>> [MALIBOTrainer] 开始严格原论文版元训练 (Device={self.device}, Tasks={self.model.num_tasks})")
+        print(f"    - 样本划分: Train={train_len:,}, Val={val_len:,} | Batch={batch_size}, MaxEpochs={self.config.epochs}")
+        print(f"    - 正则标定: lambda={self.config.reg_lambda}, lambda_KS={l_ks:.4f}, lambda_Cov={l_cov:.4f}")
+        print("=" * 84)
 
         for epoch in range(1, self.config.epochs + 1):
-            epoch_t0 = time.time()
             self.model.train()
-            epoch_lfbo = 0.0
-            epoch_reg = 0.0
-            epoch_ks = 0.0
-            epoch_cov = 0.0
-            epoch_total = 0.0
-            num_batches = 0
+            tr_total = 0.0
+            tr_lfbo = 0.0
+            n_tr_batches = 0
 
             if use_in_vram:
-                # 显存内生成整批随机置换，单次切片重排
-                perm = torch.randperm(total_samples, device=self.device)[:n_used]
-                xs = x_all[perm]
-                ts = task_idx_all[perm]
-                ws = weights_all[perm]
-
-                for i in range(0, n_used, batch_size):
-                    bx = xs[i : i + batch_size]
-                    b_task_idx = ts[i : i + batch_size]
-                    bw = ws[i : i + batch_size]
-
-                    total_loss, loss_lfbo, loss_reg, ks, cov = train_step_fn(bx, b_task_idx, bw)
-
-                    epoch_lfbo += loss_lfbo.item()
-                    epoch_reg += loss_reg.item()
-                    epoch_ks += ks.item()
-                    epoch_cov += cov.item()
-                    epoch_total += total_loss.item()
-                    num_batches += 1
+                perm = torch.randperm(len(x_tr_all), device=self.device)
+                for i in range(0, len(x_tr_all), batch_size):
+                    idx_b = perm[i : i + batch_size]
+                    bx, bt, bw = x_tr_all[idx_b], t_tr_all[idx_b], w_tr_all[idx_b]
+                    optimizer.zero_grad(set_to_none=True)
+                    logits = self.model(bx, bt)
+                    loss_lfbo = self.lfbo_criterion(logits, bw)
+                    loss_reg, _, _ = self.reg_criterion(self.model.task_embeddings)
+                    total_loss = loss_lfbo + self.config.reg_lambda * loss_reg
+                    total_loss.backward()
+                    optimizer.step()
+                    tr_total += total_loss.item()
+                    tr_lfbo += loss_lfbo.item()
+                    n_tr_batches += 1
             else:
-                for batch in loader:
-                    bx, b_task_idx, _, bw, _ = batch
-                    bx = bx.to(self.device, non_blocking=True)
-                    b_task_idx = b_task_idx.to(self.device, non_blocking=True)
-                    bw = bw.to(self.device, non_blocking=True)
-
-                    total_loss, loss_lfbo, loss_reg, ks, cov = train_step_fn(bx, b_task_idx, bw)
-
-                    epoch_lfbo += loss_lfbo.item()
-                    epoch_reg += loss_reg.item()
-                    epoch_ks += ks.item()
-                    epoch_cov += cov.item()
-                    epoch_total += total_loss.item()
-                    num_batches += 1
+                for batch in train_loader:
+                    bx, bt, _, bw = batch[0].to(self.device), batch[1].to(self.device), batch[2], batch[3].to(self.device)
+                    optimizer.zero_grad(set_to_none=True)
+                    logits = self.model(bx, bt)
+                    loss_lfbo = self.lfbo_criterion(logits, bw)
+                    loss_reg, _, _ = self.reg_criterion(self.model.task_embeddings)
+                    total_loss = loss_lfbo + self.config.reg_lambda * loss_reg
+                    total_loss.backward()
+                    optimizer.step()
+                    tr_total += total_loss.item()
+                    tr_lfbo += loss_lfbo.item()
+                    n_tr_batches += 1
 
             scheduler.step()
 
-            avg_loss = epoch_total / max(num_batches, 1)
-            avg_lfbo = epoch_lfbo / max(num_batches, 1)
-            avg_reg = epoch_reg / max(num_batches, 1)
-            avg_ks = epoch_ks / max(num_batches, 1)
-            avg_cov = epoch_cov / max(num_batches, 1)
+            # 验证集评估
+            self.model.eval()
+            va_total = 0.0
+            n_va_batches = 0
+            with torch.no_grad():
+                loss_reg_eval, ks_eval, cov_eval = self.reg_criterion(self.model.task_embeddings)
+                reg_val = float(loss_reg_eval.item())
+                ks_val = float(ks_eval.item())
+                cov_val = float(cov_eval.item())
+
+                if use_in_vram:
+                    for i in range(0, len(x_va_all), batch_size):
+                        bx, bt, bw = x_va_all[i : i + batch_size], t_va_all[i : i + batch_size], w_va_all[i : i + batch_size]
+                        logits = self.model(bx, bt)
+                        va_total += (self.lfbo_criterion(logits, bw) + self.config.reg_lambda * loss_reg_eval).item()
+                        n_va_batches += 1
+                else:
+                    for batch in val_loader:
+                        bx, bt, bw = batch[0].to(self.device), batch[1].to(self.device), batch[3].to(self.device)
+                        logits = self.model(bx, bt)
+                        va_total += (self.lfbo_criterion(logits, bw) + self.config.reg_lambda * loss_reg_eval).item()
+                        n_va_batches += 1
+
+            avg_tr = tr_total / max(n_tr_batches, 1)
+            avg_va = va_total / max(n_va_batches, 1)
+            avg_lfbo = tr_lfbo / max(n_tr_batches, 1)
             current_lr = scheduler.get_last_lr()[0]
 
             self.history["epoch"].append(epoch)
-            self.history["loss"].append(avg_loss)
+            self.history["train_loss"].append(avg_tr)
+            self.history["val_loss"].append(avg_va)
             self.history["lfbo_loss"].append(avg_lfbo)
-            self.history["reg_loss"].append(avg_reg)
-            self.history["ks_loss"].append(avg_ks)
-            self.history["cov_loss"].append(avg_cov)
+            self.history["reg_loss"].append(reg_val)
+            self.history["ks_loss"].append(ks_val)
+            self.history["cov_loss"].append(cov_val)
             self.history["lr"].append(current_lr)
 
-            # 打印日志
-            if epoch % log_interval == 0 or epoch == 1 or epoch == self.config.epochs:
-                elapsed = time.time() - t0
-                epoch_ms = (time.time() - epoch_t0) * 1000.0
-                print(
-                    f"Epoch [{epoch:4d}/{self.config.epochs:4d}] "
-                    f"| Loss: {avg_loss:.4f} (LFBO: {avg_lfbo:.4f}, Reg: {avg_reg:.4f}) "
-                    f"| KS: {avg_ks:.4f}, Cov: {avg_cov:.4f} "
-                    f"| LR: {current_lr:.2e} | Speed: {epoch_ms:.1f}ms/ep | Total: {elapsed:.1f}s"
-                )
-
-            # 评估与早停检测
-            if avg_loss < best_loss - 1e-4:
-                best_loss = avg_loss
+            if avg_va < best_val_loss - 1e-4:
+                best_val_loss = avg_va
                 patience_counter = 0
-                if checkpoint_path is not None:
-                    self.save_checkpoint(checkpoint_path)
+                best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
             else:
                 patience_counter += 1
-                if patience_counter >= self.config.early_stopping_patience:
-                    print(
-                        f"\n>>> [Early Stopping] 连续 {self.config.early_stopping_patience} 轮损失未下降，在第 {epoch} 轮触发早停!"
-                    )
-                    break
 
-        print(f"\n>>> [MALIBOTrainer] 训练完成! 最佳 Loss: {best_loss:.4f}")
+            if epoch % log_interval == 0 or epoch == 1 or patience_counter >= self.config.early_stopping_patience:
+                elapsed = time.time() - t0
+                print(
+                    f"Epoch [{epoch:4d}/{self.config.epochs:4d}] "
+                    f"| Train: {avg_tr:.4f} | Val: {avg_va:.4f} (Best: {best_val_loss:.4f}) "
+                    f"| R={reg_val:.4f} (KS={ks_val:.4f}, Cov={cov_val:.4f}) "
+                    f"| LR: {current_lr:.2e} | {elapsed:.1f}s",
+                    flush=True,
+                )
+
+            if patience_counter >= self.config.early_stopping_patience:
+                print(f">>> [Early Stopping] 连续 {self.config.early_stopping_patience} 轮验证损失未下降，在第 {epoch} 轮早停!")
+                break
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+
+        with torch.no_grad():
+            z_emb = self.model.task_embeddings.detach().cpu()
+            z_std = float(z_emb.std().item())
+            z_mean_abs = float(z_emb.mean(dim=0).abs().mean().item())
+        print(f">>> [MALIBOTrainer] 训练完成! Best Val Loss={best_val_loss:.4f}, z_t: std={z_std:.4f}, |mean|={z_mean_abs:.4f}")
+
+        if checkpoint_path is not None:
+            self.save_checkpoint(checkpoint_path, in_dim=in_dim, best_val_loss=best_val_loss)
+
         return self.history
 
-    def save_checkpoint(self, path: Path) -> None:
-        """保存模型全量权重及元信息."""
+    def save_checkpoint(self, path: Path, in_dim: int = 18, best_val_loss: float = 0.0) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
@@ -248,15 +232,18 @@ class MALIBOTrainer:
                 "model_state_dict": self.model.state_dict(),
                 "num_tasks": self.model.num_tasks,
                 "feature_dim": self.model.feature_dim,
+                "hidden_dim": self.model.phi.hidden_dim,
+                "num_hidden_layers": len(self.model.phi.res_blocks),
+                "in_dim": in_dim,
+                "best_val_loss": best_val_loss,
                 "history": self.history,
             },
             path,
         )
 
     def load_checkpoint(self, path: Path) -> None:
-        """加载已保存的检查点权重."""
         path = Path(path)
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         if "history" in checkpoint:
             self.history = checkpoint["history"]

@@ -5,6 +5,7 @@
 
 import concurrent.futures
 import json
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -90,12 +91,14 @@ class DatasetBuilder:
         t0 = time.time()
         completed_results = []
         worker_args = [
-            (spec, self.tasks_dir, force_rerun, device_str) for spec in tasks
+            (spec, self.tasks_dir, force_rerun, "cpu" if device_str is None else device_str) for spec in tasks
         ]
 
-        # 多进程并行执行
+        # 多进程并行执行 (使用 spawn 上下文避免 CUDA/OpenMP fork 死锁)
+        ctx = mp.get_context("spawn")
         with concurrent.futures.ProcessPoolExecutor(
-            max_workers=self.max_workers
+            max_workers=self.max_workers,
+            mp_context=ctx,
         ) as executor:
             future_to_task = {
                 executor.submit(_worker_wrapper, arg): arg[0] for arg in worker_args
