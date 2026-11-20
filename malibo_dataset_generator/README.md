@@ -15,17 +15,16 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **`NACA 0012`** | 纯对称翼型 (Symmetric) | 12.0% | 0.0% (零弯度) | 直升机旋翼、导弹舵面、平尾垂尾。上下完全对称，正负攻角流动对称。 |
 | **`NACA 2412`** | 经典通航巡航型 (Conventional GA) | 12.0% | 1.9% (适度弯度) | Cessna 172、经典民用轻型机。巡航阻力桶宽广，失速平缓温和。 |
-| **`NACA 6412`** | 大弯度高升力型 (High Camber) | 12.0% | 5.8% (大深弯度) | STOL 短距起降机、高空长航时无人机。极高 $C_{L0} \approx 0.7$，低速大升力。 |
-| **`NACA 2418`** | 大厚度强结构型 (Thick Structural) | 18.0% | 1.8% | 大型民航内侧翼根段、风电叶根。容积与刚度大，逆压梯度剧烈。 |
+| **`NACA 4412`** | 较大弯度高升力型 (High Camber) | 12.0% | 4.0% | 高升力巡航与无人机翼型，高 $C_{L0}$ 与平缓失速特性。 |
+| **`NACA 2415`** | 较厚结构型 (Thick Structural) | 15.0% | 2.0% | 中厚结构段翼型，兼顾翼梁抗弯刚度与良好气动效率。 |
 | **`b737b`** | 现代喷气客机跨音速/后加载型 | 12.7% | 0.8% | 波音 737 干线客机真实中段翼型。平坦吸力面延缓激波，典型后加载修形。 |
 
-### 2. 工况取值策略 (雷诺数与攻角)
-- **雷诺数 ($Re \in [10^4, 10^8]$, 跨越 4 个量级)**：
-  - 采用**常用对数均匀尺度 ($\log_{10} Re \in [4.0, 8.0]$)**；
-  - 默认 5 级基准分布：$1.0\times 10^4$ (超低Re昆虫/微型翼), $1.0\times 10^5$ (低Re航模分离泡), $1.0\times 10^6$ (中Re通用通航), $1.0\times 10^7$ (高Re喷气民航), $1.0\times 10^8$ (超高Re巨型运输机/风电)。
-- **攻角 ($\alpha \in [-3.0^\circ, 15.0^\circ]$)**：
-  - 采用**巡航核心区间自适应加密策略**；
-  - 默认 7 级基准分布：$-3.0^\circ$ (俯冲边界), $0.0^\circ$ (平飞基准), $2.5^\circ, 5.0^\circ, 7.5^\circ$ (巡航主战场加密), $11.0^\circ$ (机动爬升过渡), $15.0^\circ$ (近失速/强分离边界)。
+### 2. 工况取值策略 (雷诺数与攻角，严格排除测试点)
+- **雷诺数 ($Re \in [10^6, 10^7]$)**：10 级均匀分布 $\{1, 2, 3, 4, 5, 6, 7, 8, 9, 10\} \times 10^6$（严格排除测试点 $Re = 3.5 \times 10^6$）。
+- **攻角 ($\alpha \in [0^\circ, 10^\circ]$)**：
+  - `compact` 紧凑巡航模式（当前主训练集）：5 级 $\{0.0^\circ, 2.5^\circ, 5.0^\circ, 7.5^\circ, 10.0^\circ\}$，共 $5 \times 10 \times 5 = \mathbf{250}$ 任务 $\times$ 300 步 = **75,000 样本**（严格排除测试点 $\alpha = 3.5^\circ$）。
+  - `grid` 全网格模式：11 级 $\{0^\circ, 1^\circ, \dots, 10^\circ\}$，共 $5 \times 10 \times 11 = 550$ 任务。
+- **搜索盒对齐**：所有任务严格共享与 `RL-Airfoil` 比特级一致的 18 维统一 Kulfan CST 参数上下界。
 
 ### 3. 评估与寻优配置
 - **CFD 评估器**：`NeuralFoil ('xxxlarge')`，配合 10 项航空工业级几何约束与平滑有界主导惩罚。
@@ -64,15 +63,14 @@ malibo_dataset_generator/
 python -m malibo_dataset_generator.run_generation --mode quick_test --workers 4
 ```
 
-### 2. 生成标准全量训练集 (175 任务 x 300 步 = 52,500 条数据)
+### 2. 生成标准全量训练集 (550 任务 x 300 步 = 165,000 条数据)
 ```bash
-# 采用 8 个工作进程并发 (总耗时仅约 2~3 分钟，极速生成)
-python -m malibo_dataset_generator.run_generation --mode grid --workers 8 --max-evals 300
+python -m malibo_dataset_generator.run_generation --mode grid --workers 10 --max-evals 300
 ```
 
-### 3. 生成紧凑巡航训练集 (125 任务 x 300 步 = 37,500 条数据)
+### 3. 生成主巡航训练集 (250 任务 x 300 步 = 75,000 条数据，当前 checkpoint 对应)
 ```bash
-python -m malibo_dataset_generator.run_generation --mode compact --workers 8 --max-evals 300
+python -m malibo_dataset_generator.run_generation --mode compact --workers 10 --max-evals 300
 ```
 
 ### 4. 连续空间填充采样 (指定 T 个连续任务)
@@ -90,7 +88,7 @@ python -m malibo_dataset_generator.run_generation --mode sobol --num-tasks 100 -
 from malibo_dataset_generator.malibo_torch_dataset import MALIBOMetaDataset
 from torch.utils.data import DataLoader
 
-# 方式 1: 直接加载打包好的 .pt 文件 (秒级加载 87,500 条数据)
+# 方式 1: 直接加载打包好的 .pt 文件 (秒级加载 75,000 条数据)
 dataset = MALIBOMetaDataset(bundled_pt_path="malibo_dataset_generator/data/malibo_train_dataset.pt")
 
 print(f"任务总数 T: {dataset.num_tasks}, 样本总数 N: {dataset.total_samples}")

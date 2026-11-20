@@ -34,7 +34,7 @@ from malibo_dataset_generator.airfoil_baselines import (
     get_airfoil_bounds,
     get_airfoil_parameters,
 )
-from malibo_dataset_generator.vanilla_turbo import run_vanilla_turbo
+from turbo import run_turbo_optimization
 
 
 def main():
@@ -150,23 +150,27 @@ def main():
 
     # 4. 可选: 运行 Vanilla TuRBO 进行对比
     turbo_history = None
+    turbo_elapsed = 0.0
     if args.compare_turbo:
         print("\n--- [2/2] 运行 Vanilla TuRBO-1 作为基线对比 ---")
-        turbo_traj = run_vanilla_turbo(
-            evaluator_detailed_func=evaluator.evaluate_detailed,
+        t_turbo0 = time.time()
+        evaluator.reset_counter()
+        _calls, turbo_history, turbo_best_val, _best_theta = run_turbo_optimization(
+            objective_func=evaluator.evaluate,
             init_theta=init_theta,
             lb=lb,
             ub=ub,
-            airfoil_name=args.airfoil,
-            reynolds=args.reynolds,
-            alpha=args.alpha,
             max_evals=args.budget,
+            n_init=15,
             seed=args.seed,
-            device=device,
+            verbose_every=50,
+            is_meta=False,
+            airfoil_name=args.airfoil,
+            evaluator=evaluator,
         )
-        turbo_history = turbo_traj.best_y_history
+        turbo_elapsed = time.time() - t_turbo0
         print(
-            f"    - Vanilla TuRBO 最佳 L/D: {turbo_traj.best_fitness:.2f}, 耗时: {turbo_traj.elapsed_seconds:.1f}s"
+            f"    - Vanilla TuRBO 最佳 L/D: {turbo_best_val:.2f}, 耗时: {turbo_elapsed:.1f}s"
         )
 
     # 5. 总结对比结果
@@ -176,7 +180,7 @@ def main():
     print(f"    * MALIBO 最终最佳 L/D:   {malibo_res['best_y']:.2f} (Δ+{malibo_res['best_y'] - init_ld:.2f}) | 耗时: {malibo_res['elapsed_seconds']:.1f}s")
     if turbo_history is not None:
         turbo_best = float(turbo_history[-1])
-        print(f"    * Vanilla TuRBO 最佳 L/D: {turbo_best:.2f} (Δ+{turbo_best - init_ld:.2f}) | 耗时: {turbo_traj.elapsed_seconds:.1f}s")
+        print(f"    * Vanilla TuRBO 最佳 L/D: {turbo_best:.2f} (Δ+{turbo_best - init_ld:.2f}) | 耗时: {turbo_elapsed:.1f}s")
     print("=" * 85)
 
     # 6. 绘制收敛对比曲线

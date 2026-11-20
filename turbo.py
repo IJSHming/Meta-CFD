@@ -13,9 +13,12 @@ if hasattr(sys.stderr, "reconfigure"):
 
 import numpy as np
 import torch
+import gpytorch
 from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP
+from gpytorch.constraints import GreaterThan
 from gpytorch.kernels import MaternKernel, ScaleKernel
+from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from torch.quasirandom import SobolEngine
 
@@ -128,7 +131,8 @@ def generate_batch(
     X_cand[mask] = pert[mask]
 
     # 高性能 Thompson Sampling (支持 exploration_weight 调节采样不确定性)
-    with torch.no_grad():
+    model.eval()
+    with torch.no_grad(), gpytorch.settings.cholesky_jitter(1e-2):
         posterior = model.posterior(X_cand)
         mu = posterior.mean.squeeze(-1)
         sigma = posterior.variance.clamp_min(1e-9).sqrt().squeeze(-1)
@@ -264,30 +268,39 @@ def run_turbo_optimization(
             model = None
             restart_count += 1
 
-        # 归一化 Y
-        y_mean = Y_train.mean()
-        y_std = Y_train.std()
+        # 归一化 Y (截断极端不可行离群惩罚，避免拉崩 GP 核矩阵条件数)
+        Y_clean = torch.clamp(Y_train, min=0.0)
+        y_mean = Y_clean.mean()
+        y_std = Y_clean.std()
         if y_std < 1e-6:
-            norm_Y = Y_train - y_mean
+            norm_Y = Y_clean - y_mean
         else:
-            norm_Y = (Y_train - y_mean) / y_std
+            norm_Y = (Y_clean - y_mean) / y_std
 
         # 每 10 步或在重启/初始时拟合一次 GP 超参
         if (model is None) or (step_count % 10 == 0):
             covar_module = ScaleKernel(
                 MaternKernel(nu=2.5, ard_num_dims=dim, batch_shape=torch.Size([]))
             )
+            likelihood = GaussianLikelihood(noise_constraint=GreaterThan(1e-3))
             try:
-                model = SingleTaskGP(X_train, norm_Y, covar_module=covar_module)
+                model = SingleTaskGP(
+                    X_train, norm_Y, likelihood=likelihood, covar_module=covar_module
+                )
                 mll = ExactMarginalLogLikelihood(model.likelihood, model)
-                fit_gpytorch_mll(mll)
+                with gpytorch.settings.cholesky_jitter(1e-2):
+                    fit_gpytorch_mll(mll)
             except Exception:
-                model = SingleTaskGP(X_train, norm_Y, covar_module=covar_module)
+                model = SingleTaskGP(
+                    X_train, norm_Y, likelihood=GaussianLikelihood(noise_constraint=GreaterThan(1e-2))
+                )
         else:
             try:
                 model.set_train_data(X_train, norm_Y.squeeze(-1), strict=False)
             except Exception:
-                model = SingleTaskGP(X_train, norm_Y)
+                model = SingleTaskGP(
+                    X_train, norm_Y, likelihood=GaussianLikelihood(noise_constraint=GreaterThan(1e-2))
+                )
 
         # --- LLM 固定步数元优化干预 (在第 31, 51, 81, 121, 161 步触发，共 5 次) ---
         if is_meta and llm_agent is not None and (target_step in target_meta_steps_set):
